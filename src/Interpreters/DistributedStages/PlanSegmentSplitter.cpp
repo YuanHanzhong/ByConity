@@ -98,18 +98,6 @@ void PlanSegmentSplitter::split(QueryPlan & query_plan, PlanSegmentContext & pla
         }
         
     }
-
-    // set plan_segment_descriptions for explain analyze
-    PlanSegmentDescriptions plan_segment_descriptions;
-    for (auto & node : plan_segment_context.plan_segment_tree->getNodes())
-        plan_segment_descriptions.emplace_back(node.plan_segment->getPlanSegmentDescription());
-
-    auto * final_segment = plan_segment_context.plan_segment_tree->getRoot()->getPlanSegment();
-    if (final_segment->getQueryPlan().getRoot())
-    {
-        ExplainAnalyzeVisitor explain_visitor;
-        VisitorUtil::accept(final_segment->getQueryPlan().getRoot(), explain_visitor, plan_segment_descriptions);
-    }
 }
 
 PlanSegmentResult PlanSegmentVisitor::visitNode(QueryPlan::Node * node, PlanSegmentVisitorContext & split_context)
@@ -157,7 +145,7 @@ PlanSegmentResult PlanSegmentVisitor::visitExchangeNode(QueryPlan::Node * node, 
             output->setKeepOrder(step->needKeepOrder());
         }
 
-        split_context.inputs.emplace_back(input);
+        // split_context.inputs.emplace_back(input);
         split_context.children.emplace_back(plan_segment);
     }
     QueryPlanStepPtr remote_step
@@ -206,7 +194,7 @@ PlanSegmentResult PlanSegmentVisitor::visitCTERefNode(QueryPlan::Node * node, Pl
     else
         input->setExchangeMode(ExchangeMode::LOCAL_NO_NEED_REPARTITION);
 
-    split_context.inputs.emplace_back(input);
+    // split_context.inputs.emplace_back(input);
     split_context.children.emplace_back(plan_segment);
 
     QueryPlanStepPtr remote_step = std::make_unique<RemoteExchangeSourceStep>(
@@ -244,6 +232,9 @@ PlanSegment * PlanSegmentVisitor::createPlanSegment(QueryPlan::Node * node, size
      * Be careful, after we create a sub_plan, some nodes in the original plan have been deleted and deconstructed.
      * More precisely, nodes that moved to sub_plan are deleted.
      */
+    auto all_inputs = findInputs(node);
+    split_context.inputs = all_inputs;
+
     QueryPlan sub_plan = plan_segment_context.query_plan.getSubPlan(node);
     auto [cluster_name, parallel] = findClusterAndParallelSize(sub_plan.getRoot(), split_context);
 
@@ -488,20 +479,6 @@ std::optional<Partitioning::Handle> SourceNodeFinder::visitRemoteExchangeSourceN
         }
     }
     return {};
-}
-
-void ExplainAnalyzeVisitor::visitExplainAnalyzeNode(QueryPlan::Node * node, PlanSegmentDescriptions & descs)
-{
-    auto * explain = dynamic_cast<ExplainAnalyzeStep *>(node->step.get());
-    explain->setPlanSegmentDescriptions(descs);
-}
-
-void ExplainAnalyzeVisitor::visitNode(QueryPlan::Node * node, PlanSegmentDescriptions & descs)
-{
-    for (const auto & child : node->children)
-    {
-        VisitorUtil::accept(child, *this, descs);
-    }
 }
 
 }

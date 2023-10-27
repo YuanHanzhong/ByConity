@@ -196,9 +196,14 @@ ExchangeResult ExchangeVisitor::visitLimitNode(LimitNode & node, ExchangeContext
     return enforceNodeAndStream(node, cxt);
 }
 
+ExchangeResult ExchangeVisitor::visitOffsetNode(OffsetNode & node, ExchangeContext & cxt)
+{
+    return enforceNodeAndStream(node, cxt);
+}
+
 ExchangeResult ExchangeVisitor::visitLimitByNode(LimitByNode & node, ExchangeContext & cxt)
 {
-    return visitPlanNode(node, cxt);
+    return enforceNodeAndStream(node, cxt);
 }
 
 ExchangeResult ExchangeVisitor::visitTotalsHavingNode(TotalsHavingNode & node, ExchangeContext & cxt)

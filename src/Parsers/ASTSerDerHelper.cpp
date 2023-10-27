@@ -23,6 +23,7 @@
 #include <Parsers/ASTColumnsMatcher.h>
 #include <Parsers/ASTColumnsTransformers.h>
 #include <Parsers/ASTConstraintDeclaration.h>
+#include <Parsers/ASTBitEngineConstraintDeclaration.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTCreateQuotaQuery.h>
 #include <Parsers/ASTCreateRoleQuery.h>
@@ -34,7 +35,7 @@
 #include <Parsers/ASTDictionaryAttributeDeclaration.h>
 #include <Parsers/ASTDropAccessEntityQuery.h>
 #include <Parsers/ASTDropQuery.h>
-#include <Parsers/ASTDumpInfoQuery.h>
+#include <Parsers/ASTDumpQuery.h>
 #include <Parsers/ASTExplainQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTExternalDDLQuery.h>

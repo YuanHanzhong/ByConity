@@ -41,9 +41,7 @@ namespace Catalog
         put_req.value = StringRef(value);
         put_req.if_not_exists = if_not_exists;
 
-        FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
-        check_fdb_op(fdb_client->CreateTransaction(tr));
-        check_fdb_op(fdb_client->Put(tr, put_req));
+        check_fdb_op(fdb_client->Put(put_req));
     }
 
 std::pair<bool, String> MetastoreFDBImpl::putCAS(const String & key, const String & value, const String & expected, bool with_old_value)
@@ -53,9 +51,7 @@ std::pair<bool, String> MetastoreFDBImpl::putCAS(const String & key, const Strin
     put_req.value = StringRef(value);
     put_req.expected_value = StringRef(expected);
 
-    FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
-    check_fdb_op(fdb_client->CreateTransaction(tr));
-    fdb_error_t code = fdb_client->Put(tr, put_req);
+    fdb_error_t code = fdb_client->Put(put_req);
 
     if (code == FDB::FDBError::FDB_not_committed)
     {
@@ -73,10 +69,8 @@ std::pair<bool, String> MetastoreFDBImpl::putCAS(const String & key, const Strin
 
 uint64_t MetastoreFDBImpl::get(const String & key, String & value)
 {
-    FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
-    check_fdb_op(fdb_client->CreateTransaction(tr));
     FDB::GetResponse res;
-    check_fdb_op(fdb_client->Get(tr, key, res));
+    check_fdb_op(fdb_client->Get(key, res));
     if (res.is_present)
     {
         value = res.value;
@@ -102,16 +96,12 @@ std::vector<std::pair<String, UInt64>> MetastoreFDBImpl::multiGet(const std::vec
 
 void MetastoreFDBImpl::drop(const String & key, [[maybe_unused]] const UInt64 & expected)
 {
-    FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
-    check_fdb_op(fdb_client->CreateTransaction(tr));
-    check_fdb_op(fdb_client->Delete(tr, key));
+    check_fdb_op(fdb_client->Delete(key));
 }
 
 void MetastoreFDBImpl::drop(const String & key, const String & expected_value)
 {
-    FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
-    check_fdb_op(fdb_client->CreateTransaction(tr));
-    check_fdb_op(fdb_client->Delete(tr, key, expected_value));
+    check_fdb_op(fdb_client->Delete(key, expected_value));
 }
 
 MetastoreFDBImpl::IteratorPtr MetastoreFDBImpl::getAll()
@@ -155,10 +145,7 @@ bool MetastoreFDBImpl::batchWrite(const BatchCommitRequest & req, BatchCommitRes
     FDB::FDBTransactionPtr tr = std::make_shared<FDB::FDBTransactionRAII>();
     check_fdb_op(fdb_client->CreateTransaction(tr));
     fdb_error_t error_code = fdb_client->MultiWrite(tr, req, response);
-    if (error_code == FDB::FDBError::FDB_not_committed && !response.puts.empty())
-        return false;
-    else
-        check_fdb_op(error_code);
+    check_fdb_op(error_code);
 
     return true;
 }

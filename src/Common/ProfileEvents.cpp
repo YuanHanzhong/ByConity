@@ -21,6 +21,7 @@
 
 #include <Common/ProfileEvents.h>
 #include <Common/CurrentThread.h>
+#include <Common/StringUtils/StringUtils.h>
 #include <Common/typeid_cast.h>
 #include <Columns/ColumnArray.h>
 
@@ -612,6 +613,8 @@
     M(ClearStagePartsMetaFailed, "") \
     M(ClearDataPartsMetaForTableSuccess, "") \
     M(ClearDataPartsMetaForTableFailed, "") \
+    M(ClearDeleteBitmapsMetaForTableSuccess, "") \
+    M(ClearDeleteBitmapsMetaForTableFailed, "") \
     M(GetSyncListSuccess, "") \
     M(GetSyncListFailed, "") \
     M(ClearSyncListSuccess, "") \
@@ -775,7 +778,8 @@
     M(ReadBufferFromS3Read, "remote s3 read op count") \
     M(ReadBufferFromS3ReadFailed, "remote s3 read failed count") \
     M(ReadBufferFromS3ReadBytes, "remote s3 read op size") \
-    M(ReadBufferFromS3ReadMicro, "remote s3 read op time") \
+    M(ReadBufferFromS3ReadMicroseconds, "remote s3 read op time") \
+    M(ReadBufferFromS3InitMicroseconds, "Time spent initializing connection to S3.") \
     \
     M(IOSchedulerOpenFileMicro, "Time used in open file when using io scheduler") \
     M(IOSchedulerScheduleMicro, "Time used in schedule io request") \
@@ -796,13 +800,15 @@
     M(PFRAWSReadBufferReadMicro, "PFRAWSReadBufferFromFS read time, including seek and nextImpl") \
     \
     M(S3TrivialReaderReadCount, "S3TrivialReader read count") \
-    M(S3TrivialReaderReadMicro, "S3TrivialReader read micro seconds") \
+    M(S3TrivialReaderReadMicroseconds, "S3TrivialReader read micro seconds") \
     M(S3TrivialReaderReadBytes, "S3TrivialReader read bytes") \
     M(S3ReadAheadReaderReadCount, "S3ReadAheadReader read count") \
     M(S3ReadAheadReaderRemoteReadCount, "S3ReadAheadReader remote read count") \
     M(S3ReadAheadReaderReadMicro, "S3ReadAheadReader read micro seconds") \
     M(S3ReadAheadReaderExpectReadBytes, "S3ReadAheadReader expected read bytes") \
     M(S3ReadAheadReaderReadBytes, "S3ReadAheadReader readed bytes") \
+    M(S3ResetSessions, "Number of HTTP sessions that were reset in S3 read.") \
+    M(S3PreservedSessions, "Number of HTTP sessions that were preserved in S3 read.") \
     M(ConnectionPoolIsFullMicroseconds, "Total time spent waiting for a slot in connection pool.") \
     \
     M(PocoHTTPS3GetCount, "") \
@@ -823,6 +829,8 @@
     \
     M(TSORequest, "Number requests sent to TSO") \
     M(TSOError, "Error logged by TSO Service as a response to CNCH") \
+    \
+    M(BackupVW, "Whether use backup virtual warehouse or not") \
     \
     M(PutAccessEntitySuccess, "") \
     M(PutAccessEntityFailed, "") \
@@ -845,18 +853,24 @@ constexpr Event END = __COUNTER__;
 
 /// Global variable, initialized by zeros.
 Counter global_counters_array[END] {};
+LabelledCounter global_labelled_counters_array[END] {};
+std::mutex global_labelled_counters_locks[END] {};
 /// Initialize global counters statically
-Counters global_counters(global_counters_array);
+Counters global_counters(global_counters_array, global_labelled_counters_array, global_labelled_counters_locks);
 
 const Event Counters::num_counters = END;
 
 
 Counters::Counters(VariableContext level_, Counters * parent_)
     : counters_holder(new Counter[num_counters] {}),
+      labelled_counters_holder(new LabelledCounter[num_counters] {}),
+      labelled_counters_locks_holder(new std::mutex[num_counters] {}),
       parent(parent_),
       level(level_)
 {
     counters = counters_holder.get();
+    labelled_counters = labelled_counters_holder.get();
+    labelled_counters_locks = labelled_counters_locks_holder.get();
 }
 
 void Counters::resetCounters()
@@ -866,6 +880,11 @@ void Counters::resetCounters()
         for (Event i = 0; i < num_counters; ++i)
             counters[i].store(0, std::memory_order_relaxed);
     }
+    if (labelled_counters)
+    {
+        for (Event i = 0; i < num_counters; ++i)
+            labelled_counters[i].clear();
+    }
 }
 
 void Counters::reset()
@@ -874,17 +893,22 @@ void Counters::reset()
     resetCounters();
 }
 
+uint64_t Counters::getIOReadTime() const
+{
+    if (counters)
+        return counters[ProfileEvents::HDFSReadElapsedMilliseconds] * 1000 + counters[ProfileEvents::DiskReadElapsedMicroseconds];
+    return 0;
+}
+
 Counters Counters::getPartiallyAtomicSnapshot() const
 {
     Counters res(VariableContext::Snapshot, nullptr);
     for (Event i = 0; i < num_counters; ++i)
+    {
         res.counters[i].store(counters[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+        res.labelled_counters[i] = getLabelledCounters(i);
+    }
     return res;
-}
-
-uint64_t Counters::getIOReadTime() const
-{
-    return counters[ProfileEvents::HDFSReadElapsedMilliseconds] * 1000 + counters[ProfileEvents::DiskReadElapsedMicroseconds];
 }
 
 const char * getName(Event event)
@@ -897,6 +921,15 @@ const char * getName(Event event)
     };
 
     return strings[event];
+}
+
+const DB::String getSnakeName(Event event)
+{
+    DB::String res{getName(event)};
+
+    convertCamelToSnake(res);
+
+    return res;
 }
 
 const char * getDocumentation(Event event)
@@ -914,10 +947,13 @@ const char * getDocumentation(Event event)
 
 Event end() { return END; }
 
-
-void increment(Event event, Count amount)
+void increment(Event event, Count amount, MetricLabels labels, Metrics::MetricType type, time_t ts)
 {
-    DB::CurrentThread::getProfileEvents().increment(event, amount);
+    DB::CurrentThread::getProfileEvents().increment(event, amount, labels);
+    if (type != Metrics::MetricType::None)
+    {
+        Metrics::EmitMetric(type, getSnakeName(event), amount, LabelledMetrics::toString(labels), ts);
+    }
 }
 
 }

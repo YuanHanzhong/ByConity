@@ -142,9 +142,9 @@ PlanNodePtr ColumnPruningVisitor::visitFinalSampleNode(FinalSampleNode &, NameSe
     throw Exception("Not impl column pruning", ErrorCodes::NOT_IMPLEMENTED);
 }
 
-PlanNodePtr ColumnPruningVisitor::visitOffsetNode(OffsetNode &, NameSet &)
+PlanNodePtr ColumnPruningVisitor::visitOffsetNode(OffsetNode & node, NameSet & require)
 {
-    throw Exception("Not impl column pruning", ErrorCodes::NOT_IMPLEMENTED);
+    return visitDefault<false>(node, require);
 }
 
 PlanNodePtr ColumnPruningVisitor::visitTableFinishNode(TableFinishNode & node, NameSet & require)
@@ -658,7 +658,7 @@ PlanNodePtr ColumnPruningVisitor::visitJoinNode(JoinNode & node, NameSet & requi
         for (const auto & origin_output : step->getOutputStream().header)
             if (output.name == origin_output.name)
             {
-                if (origin_output.type->isNullable())
+                if (isNullableOrLowCardinalityNullable(origin_output.type))
                 {
                     output.type = JoinCommon::tryConvertTypeToNullable(output.type);
                 }
@@ -682,6 +682,7 @@ PlanNodePtr ColumnPruningVisitor::visitJoinNode(JoinNode & node, NameSet & requi
         step->getJoinAlgorithm(),
         step->isMagic(),
         step->isOrdered(),
+        step->isSimpleReordered(),
         step->getRuntimeFilterBuilders(),
         step->getHints());
 

@@ -176,6 +176,11 @@ StorageCnchMergeTree::StorageCnchMergeTree(
     relative_auxility_storage_path = fs::path("auxility_store") / relative_table_path / "";
     format_version = MERGE_TREE_CHCH_DATA_STORAGTE_VERSION;
 
+    /// check cluster by keys, for BitEngine, only when creating table first time
+    if (isBitEngineTable() && !attach_)
+        checkSchemaForBitEngineTable(context_);
+
+    registerBitEngineDictionaries();
 }
 
 /// NOTE: it involve a RPC. We have a CnchStorageCache to avoid invoking this RPC frequently.
@@ -1353,12 +1358,12 @@ void StorageCnchMergeTree::executeDedupForRepair(const ASTPtr & partition, Conte
 
     auto catalog = local_context->getCnchCatalog();
 
-    CnchDedupHelper::DedupScope scope = CnchDedupHelper::DedupScope::Table();
+    CnchDedupHelper::DedupScope scope = CnchDedupHelper::DedupScope::TableDedup();
     if (partition)
     {
         NameOrderedSet partitions;
         partitions.insert(getPartitionIDFromQuery(partition, local_context));
-        scope = CnchDedupHelper::DedupScope::Partitions(partitions);
+        scope = CnchDedupHelper::DedupScope::PartitionDedup(partitions);
     }
 
     auto cnch_lock = txn->createLockHolder(CnchDedupHelper::getLocksToAcquire(
@@ -2109,61 +2114,6 @@ void StorageCnchMergeTree::alter(const AlterCommands & commands, ContextPtr loca
 
 void StorageCnchMergeTree::checkAlterSettings(const AlterCommands & commands) const
 {
-    static std::set<String> supported_settings = {
-        "cnch_vw_default",
-        "cnch_vw_read",
-        "cnch_vw_write",
-        "cnch_vw_task",
-        "cnch_server_vw",
-
-        /// Setting for memory buffer
-        "cnch_enable_memory_buffer",
-        "cnch_memory_buffer_size",
-        "min_time_memory_buffer_to_flush",
-        "max_time_memory_buffer_to_flush",
-        "min_bytes_memory_buffer_to_flush",
-        "max_bytes_memory_buffer_to_flush",
-        "min_rows_memory_buffer_to_flush",
-        "max_rows_memory_buffer_to_flush",
-        "max_block_size_in_memory_buffer",
-        "max_bytes_to_write_wal",
-        "enable_flush_buffer_with_multi_threads",
-        "max_flush_threads_num",
-
-        "gc_remove_bitmap_batch_size",
-        "gc_remove_bitmap_thread_pool_size",
-
-        "insertion_label_ttl",
-        "enable_local_disk_cache",
-        "enable_preload_parts",
-        "enable_parts_sync_preload",
-        "parts_preload_level",
-        "cnch_parallel_prefetching",
-        "enable_prefetch_checksums",
-        "cnch_parallel_preloading",
-
-        "enable_addition_bg_task",
-        "max_addition_bg_task_num",
-        "max_addition_mutation_task_num",
-        "max_partition_for_multi_select",
-
-        "cnch_merge_parts_cache_timeout",
-        "cnch_merge_parts_cache_min_count",
-        "cnch_merge_enable_batch_select",
-        "cnch_merge_max_total_rows_to_merge",
-        "cnch_merge_max_total_bytes_to_merge",
-        "cnch_merge_max_parts_to_merge",
-        "cnch_merge_only_realtime_partition",
-        "cnch_merge_select_nonadjacent_parts",
-        "cnch_merge_pick_worker_algo",
-        "cnch_merge_round_robin_partitions_interval",
-        "cnch_gc_round_robin_partitions_interval",
-        "cnch_gc_round_robin_partitions_number",
-        "gc_remove_part_thread_pool_size",
-        "gc_remove_part_batch_size",
-        "cluster_by_hint",
-    };
-
     /// Check whether the value is legal for Setting.
     /// For example, we have a setting item, `SettingBool setting_test`
     /// If you submit a Alter query: "Alter table test modify setting setting_test='abc'"
@@ -2177,11 +2127,15 @@ void StorageCnchMergeTree::checkAlterSettings(const AlterCommands & commands) co
 
         for (auto & change : command.settings_changes)
         {
-            if (!supported_settings.count(change.name))
+            if (MergeTreeSettings::isReadonlySetting(change.name))
                 throw Exception("Setting " + change.name + " cannot be modified", ErrorCodes::SUPPORT_IS_DISABLED);
 
             if (getInMemoryMetadataPtr()->hasUniqueKey() && change.name == "cnch_enable_memory_buffer" && change.value.get<Int64>() == 1)
                 throw Exception("Table with UNIQUE KEY doesn't support memory buffer", ErrorCodes::SUPPORT_IS_DISABLED);
+
+            /// Prevent set partition_level_unique_keys to 0
+            if (getInMemoryMetadataPtr()->hasUniqueKey() && change.name == "partition_level_unique_keys" && change.value.get<UInt8>() == 0)
+                throw Exception("Setting 'partition_level_unique_keys' can not change to table_level.", ErrorCodes::SUPPORT_IS_DISABLED);
 
             if (change.name.find("cnch_vw_") == 0)
                 checkAlterVW(change.value.get<String>());
@@ -2325,11 +2279,34 @@ void StorageCnchMergeTree::dropPartsImpl(
                     }
                 }
 
+                LocalDeleteBitmaps new_bitmaps;
+                if (metadata_snapshot->hasUniqueKey() && !local_context->getSettingsRef().enable_unique_table_detach_ignore_delete_bitmap)
+                {
+                    /// Create new base delete bitmap, it will be convenient to handle only one necessary bitmap meta.
+                    getDeleteBitmapMetaForParts(parts, local_context, local_context->getCurrentCnchStartTime(), /*force_found*/ false);
+                    for (size_t i = 0; i < parts.size(); ++i)
+                    {
+                        IMergeTreeDataPartPtr curr_part = parts[i];
+                        while (curr_part)
+                        {
+                            auto new_bitmap = curr_part->createNewBaseDeleteBitmap(txn->getTransactionID());
+                            if (new_bitmap)
+                            {
+                                resources.push_back(
+                                    new_bitmap->getUndoResource(txn->getTransactionID(), UndoResourceType::S3DetachDeleteBitmap));
+                                new_bitmaps.push_back(std::move(new_bitmap));
+                            }
+                            curr_part = curr_part->tryGetPreviousPart();
+                        }
+                    }
+                }
+
                 // Write undo buffer first
                 local_context->getCnchCatalog()->writeUndoBuffer(
                     UUIDHelpers::UUIDToString(getStorageUUID()), txn->getTransactionID(), resources);
 
-                auto action = txn->createAction<S3DetachMetaAction>(shared_from_this(), parts);
+                DeleteBitmapMetaPtrVector bitmap_metas = dumpDeleteBitmaps(*this, new_bitmaps);
+                auto action = txn->createAction<S3DetachMetaAction>(shared_from_this(), parts, bitmap_metas);
                 txn->appendAction(action);
                 break;
             }
@@ -2908,6 +2885,54 @@ void StorageCnchMergeTree::mutate(const MutationCommands & commands, ContextPtr 
         auto istorage = shared_from_this();
         merge_mutate_thread->triggerPartMutate(shared_from_this());
     }
+}
+
+void StorageCnchMergeTree::checkSchemaForBitEngineTable(const ContextPtr & context_) const
+{
+    if (context_->getServerType() != ServerType::cnch_server)
+        return;
+
+    MergeTreeMetaBase::checkSchemaForBitEngineTable(context_);
+}
+
+void StorageCnchMergeTree::checkUnderlyingDictionaryTable(const BitEngineHelper::DictionaryDatabaseAndTable & dict_table)
+{
+    /// 1. check the cluster_by clause, it should keep consistent with the BitEngine table
+    auto context_v = getContext();
+    auto dict_storage = DatabaseCatalog::instance().getTable(StorageID{dict_table.database, dict_table.table}, context_v);
+
+    if (!dict_storage)
+    {
+        throw Exception(fmt::format("Fail to get StoragePtr of table {}.{}",
+            dict_table.database, dict_table.table), ErrorCodes::LOGICAL_ERROR);
+    }
+
+    /// 2. check dictionary key type
+    auto dict_physical_columns = dict_storage->getInMemoryMetadataPtr()->getColumns().getAllPhysical();
+    NameAndTypePair key_column, value_column;
+    for (const auto & column : dict_physical_columns)
+    {
+        if (column.name == "key")
+            key_column = column;
+        else if (column.name == "value")
+            value_column = column;
+    }
+
+    if (key_column.name.empty())
+        throw Exception("You should specify a column named `key`.", ErrorCodes::ILLEGAL_COLUMN);
+    if (value_column.name.empty())
+        throw Exception("You should specify a column named `value`.", ErrorCodes::ILLEGAL_COLUMN);
+
+    if (dict_table.dict_key_type == BitEngineHelper::KeyType::KEY_INTEGER &&
+        !WhichDataType(key_column.type).isUInt64())
+        throw Exception("Key column type should be UInt64 for a Integer BitEngine field",
+            ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+    else if (dict_table.dict_key_type == BitEngineHelper::KeyType::KEY_STRING &&
+        !isString(key_column.type))
+        throw Exception("Key column type should be String for a String BitEngine field", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+
+    if (!WhichDataType(value_column.type).isUInt64())
+        throw Exception("Value column type should be UInt64", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
 }
 
 } // end namespace DB

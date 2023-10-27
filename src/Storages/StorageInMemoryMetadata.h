@@ -230,7 +230,8 @@ struct StorageInMemoryMetadata
     /// Storage metadata. StorageID required only for more clear exception
     /// message.
     Block getSampleBlockForColumns(
-        const Names & column_names, const NamesAndTypesList & virtuals = {}, const StorageID & storage_id = StorageID::createEmpty()) const;
+        const Names & column_names, const NamesAndTypesList & virtuals = {}, const StorageID & storage_id = StorageID::createEmpty(),
+        BitEngineReadType bitengine_read_type = BitEngineReadType::ONLY_SOURCE) const;
 
     /// Returns structure with partition key.
     const KeyDescription & getPartitionKey() const;
@@ -251,8 +252,10 @@ struct StorageInMemoryMetadata
     bool isClusterByKeyDefined() const;
     /// Storage has cluster by key.
     bool hasClusterByKey() const;
-    /// Returns column names that need to be read to calculate cluster by key.
+    /// Returns columns names in cluster by specified by. For example: 'id', 'sipHash64(id)', etc.
     Names getColumnsForClusterByKey() const;
+    /// Returns column names that need to be read to calculate cluster by key.
+    Names getColumnsRequiredForClusterByKey() const;
     Int64 getBucketNumberFromClusterByKey() const;
     Int64 getSplitNumberFromClusterByKey() const;
     bool getWithRangeFromClusterByKey() const;

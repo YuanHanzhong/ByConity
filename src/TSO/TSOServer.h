@@ -16,8 +16,7 @@
 #pragma once
 
 #include <Common/Config/ConfigProcessor.h>
-#include <Coordination/LeaderElection.h>
-#include <Coordination/LeaderElectionBase.h>
+#include <Common/StorageElection/StorageElector.h>
 #include <daemon/BaseDaemon.h>
 #include <Server/IServer.h>
 #include <TSO/TSOProxy.h>
@@ -26,6 +25,7 @@
 #include <Poco/Timer.h>
 #include <ServiceDiscovery/IServiceDiscovery.h>
 #include <Interpreters/Context_fwd.h>
+#include <Server/HTTP/HTTPServer.h>
 
 
 #define TSO_VERSION "1.0.0"
@@ -42,7 +42,7 @@ namespace TSO
 
 class TSOImpl;
 
-class TSOServer : public BaseDaemon, public IServer, public LeaderElectionBase
+class TSOServer : public BaseDaemon, public IServer
 {
 
 public:
@@ -83,18 +83,24 @@ public:
         return BaseDaemon::isCancelled();
     }
 
+    /// Functions for exposing metrics
+    int getNumYieldedLeadership() const { return num_yielded_leadership; }
+    String tryGetTSOLeaderHostPort() const;
+
+    bool isLeader() const;
+
 protected:
     int run() override;
 
     int main(const std::vector<std::string> & args) override;
 
 private:
+    friend class TSOImpl;
+
     Poco::Logger * log;
 
     size_t tso_window;
-    Int32 tso_max_retry_count; // TSOV: see if can keep or remove
 
-    int tso_port;
     String host_port;
 
     TSOProxyPtr proxy_ptr;
@@ -108,17 +114,18 @@ private:
 
     ContextMutablePtr global_context;
 
-    std::shared_ptr<KeeperDispatcher> keeper_dispatcher;
+    std::unique_ptr<StorageElector> leader_election;
 
     /// keep tcp servers for clickhouse-keeper
     std::vector<ProtocolServerAdapterPtr> keeper_servers;
 
-    void onLeader() override;
-    void exitLeaderElection() override;
-    void enterLeaderElection() override;
+    // Metrics
+    int num_yielded_leadership;
 
-    using CreateServerFunc = std::function<std::shared_ptr<ProtocolServerAdapter>(UInt16)>;
-    void createServer(const std::string & listen_host, const char * port_name, bool listen_try, CreateServerFunc && func);
+    bool onLeader();
+    bool onFollower();
+    void initLeaderElection();
+
     Poco::Net::SocketAddress socketBindListen(Poco::Net::ServerSocket & socket, const std::string & host, UInt16 port, [[maybe_unused]] bool secure = false) const;
 };
 

@@ -19,7 +19,7 @@ static String getTenantId()
     String empty_result;
     if (!CurrentThread::isInitialized())
         return empty_result;
-    const Context * context = CurrentThread::get().getQueryContext().get();
+    auto context = CurrentThread::get().getQueryContext();
     if (context)
     {
         if (!context->getTenantId().empty())
@@ -30,12 +30,19 @@ static String getTenantId()
     return CurrentThread::get().getTenantId();
 }
 
+static bool enable_tenant_systemdb = true;
+
+void setEnableTenantSystemDB(bool v)
+{
+    enable_tenant_systemdb = v; 
+}
+
 String getCurrentCatalog()
 {
     String empty_result;
     if (!CurrentThread::isInitialized())
         return empty_result;
-    const Context * context = CurrentThread::get().getQueryContext().get();
+    auto context = CurrentThread::get().getQueryContext();
     if (context)
     {
         if (!context->getCurrentCatalog().empty())
@@ -54,6 +61,11 @@ static bool isInternalDatabaseName(const String & database_name)
     {
         if (db == database_name)
             return true;
+    }
+    if(!enable_tenant_systemdb)
+    {
+        if (DatabaseCatalog::SYSTEM_DATABASE == database_name)
+            return true; 
     }
     return false;
 }

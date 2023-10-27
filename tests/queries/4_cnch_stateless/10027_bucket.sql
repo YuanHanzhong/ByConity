@@ -61,7 +61,7 @@ INSERT INTO bucket3 VALUES ('jack', 15);
 SELECT * FROM bucket3 ORDER BY name FORMAT CSV;
 SELECT bucket_number FROM system.cnch_parts where database = currentDatabase() and table = 'bucket3' FORMAT CSV;
 
--- Ensure bucket number is assigned to a part in bucket table with shard ratio
+-- Ensure bucket number is assigned to a part in bucket table with shard ratio 
 INSERT INTO bucket_with_split_number VALUES ('vivek', 10);
 SELECT * FROM bucket_with_split_number ORDER BY name FORMAT CSV;
 SELECT bucket_number FROM system.cnch_parts where database = currentDatabase() and table = 'bucket_with_split_number' FORMAT CSV;
@@ -79,7 +79,6 @@ SELECT * FROM dts_bucket_with_split_number_n_range ORDER BY name FORMAT CSV;
 SELECT bucket_number FROM system.cnch_parts where database = currentDatabase() and table = 'dts_bucket_with_split_number_n_range' FORMAT CSV;
 SELECT split_number, with_range FROM system.cnch_tables where database = currentDatabase() and name = 'dts_bucket_with_split_number_n_range' FORMAT CSV;
 
-
 -- Attach partition is allowed between bucket tables with different table_definition_hash
 INSERT INTO bucket_attach VALUES ('tracy', 20);
 INSERT INTO bucket_attach_2 VALUES ('jane', 10);
@@ -88,6 +87,7 @@ ALTER TABLE bucket_attach ATTACH PARTITION 'jane' from bucket_attach_2;
 SELECT * FROM bucket_attach ORDER BY name FORMAT CSV;
 SELECT * FROM bucket_attach_2 ORDER BY name FORMAT CSV; -- empty results returned as part has been dropped from this table during attach
 SELECT count(DISTINCT table_definition_hash) FROM system.cnch_parts where database = currentDatabase() and table = 'bucket_attach' and active FORMAT CSV;
+SELECT sleep(3) FORMAT Null; -- wait for cluster_status to be changed
 SELECT cluster_status FROM system.cnch_table_info where database = currentDatabase() and table = 'bucket_attach' FORMAT CSV;
 
 -- Ensure bucket number is assigned using user defined cluster by expression

@@ -141,7 +141,8 @@ struct ArrayCompactImpl
             executeType<Float64>(mapped, array, res)) ||
             executeType<Decimal32>(mapped, array, res) ||
             executeType<Decimal64>(mapped, array, res) ||
-            executeType<Decimal128>(mapped, array, res))
+            executeType<Decimal128>(mapped, array, res) ||
+            executeType<Decimal256>(mapped, array, res))
         {
             executeGeneric(mapped, array, res);
         }
@@ -152,7 +153,7 @@ struct ArrayCompactImpl
 struct NameArrayCompact { static constexpr auto name = "arrayCompact"; };
 using FunctionArrayCompact = FunctionArrayMapped<ArrayCompactImpl, NameArrayCompact>;
 
-void registerFunctionArrayCompact(FunctionFactory & factory)
+REGISTER_FUNCTION(ArrayCompact)
 {
     factory.registerFunction<FunctionArrayCompact>();
 }

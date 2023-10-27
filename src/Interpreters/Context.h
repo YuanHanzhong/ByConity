@@ -251,7 +251,6 @@ using UniqueKeyIndexCachePtr = std::shared_ptr<UniqueKeyIndexCache>;
 using UniqueKeyIndexBlockCachePtr = std::shared_ptr<IndexFile::Cache>;
 using UniqueKeyIndexFileCachePtr = std::shared_ptr<IndexFile::RemoteFileCache>;
 class DeleteBitmapCache;
-class CnchStorageCache;
 class PartCacheManager;
 class IServiceDiscovery;
 using ServiceDiscoveryClientPtr = std::shared_ptr<IServiceDiscovery>;
@@ -304,6 +303,7 @@ enum class ServerType
     cnch_worker,
     cnch_daemon_manager,
     cnch_resource_manager,
+    cnch_tso_server,
     cnch_bytepond,
 };
 
@@ -1140,6 +1140,9 @@ public:
     ThrottlerPtr getReplicatedFetchesThrottler() const;
     ThrottlerPtr getReplicatedSendsThrottler() const;
 
+    void initPreloadThrottler();
+    ThrottlerPtr tryGetPreloadThrottler() const;
+
     /// Has distributed_ddl configuration or not.
     bool hasDistributedDDL() const;
     void setDDLWorker(std::unique_ptr<DDLWorker> ddl_worker);
@@ -1397,17 +1400,14 @@ public:
     void initTSOClientPool(const String & service_name);
     std::shared_ptr<TSO::TSOClient> getCnchTSOClient() const;
 
-    String getTSOLeaderHostPort() const;
+    void initTSOElectionReader();
+    String tryGetTSOLeaderHostPort() const;
     void updateTSOLeaderHostPort() const;
-    void setTSOLeaderHostPort(String host_port) const;
 
     UInt64 getTimestamp() const;
     UInt64 tryGetTimestamp(const String & pretty_func_name = "Context") const;
     UInt64 getTimestamps(UInt32 size) const;
     UInt64 getPhysicalTimestamp() const;
-
-    void setCnchStorageCache(size_t max_cache_size);
-    std::shared_ptr<CnchStorageCache> getCnchStorageCache() const;
 
     void setPartCacheManager();
     std::shared_ptr<PartCacheManager> getPartCacheManager() const;
@@ -1415,7 +1415,7 @@ public:
     ThreadPool & getPartCacheManagerThreadPool();
 
     /// catalog related
-    void initCatalog(MetastoreConfig & catalog_conf, const String & name_space);
+    void initCatalog(const MetastoreConfig & catalog_conf, const String & name_space);
     std::shared_ptr<Catalog::Catalog> tryGetCnchCatalog() const;
     std::shared_ptr<Catalog::Catalog> getCnchCatalog() const;
 
@@ -1429,7 +1429,7 @@ public:
     void setCnchTopologyMaster();
     std::shared_ptr<CnchTopologyMaster> getCnchTopologyMaster() const;
 
-    void updateQueueManagerConfig();
+    void updateQueueManagerConfig() const;
     void setServerType(const String & type_str);
     ServerType getServerType() const;
 

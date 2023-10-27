@@ -39,6 +39,8 @@ public:
 
     bool useDefaultImplementationForNulls() const override { return false; }
 
+    bool useDefaultImplementationForNothing() const override { return false; }
+
     bool isSuitableForConstantFolding() const override { return false; }
 
     String getName() const override
@@ -58,7 +60,7 @@ public:
 };
 
 
-void registerFunctionIndexHint(FunctionFactory & factory)
+REGISTER_FUNCTION(IndexHint)
 {
     factory.registerFunction<FunctionIndexHint>();
 }

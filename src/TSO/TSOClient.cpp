@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#include <Common/Configurations.h>
 #include <TSO/TSOClient.h>
 
 #include <Protos/tso.pb.h>
@@ -24,6 +24,12 @@
 
 #include <chrono>
 #include <thread>
+
+namespace ProfileEvents
+{
+    extern const Event TSORequest;
+    extern const Event TSOError;
+}
 
 namespace DB
 {
@@ -80,15 +86,16 @@ GetTimestampsResp TSOClient::getTimestamps(UInt32 size)
 
 UInt64 getTSOResponse(const Context & context, TSORequestType type, size_t size)
 {
-    const auto & config = context.getConfigRef();
-    int tos_max_retry = config.getInt("tso_service.tso_max_retry_count", 3);
-    bool use_tso_fallback = config.getBool("tso_service.use_fallback", true);
+    const auto & config = context.getRootConfig();
+    int tos_max_retry = config.tso_service.tso_max_retry_count;
+    bool use_tso_fallback = config.tso_service.use_fallback;
 
     std::string new_leader;
     int retry = tos_max_retry;
 
     while (retry--)
     {
+        ProfileEvents::increment(ProfileEvents::TSORequest);
         try
         {
             auto tso_client = context.getCnchTSOClient();
@@ -115,6 +122,7 @@ UInt64 getTSOResponse(const Context & context, TSORequestType type, size_t size)
         }
         catch (Exception & e)
         {
+            ProfileEvents::increment(ProfileEvents::TSOError);
             if (use_tso_fallback && e.code() != ErrorCodes::BRPC_TIMEOUT)
             {
                 /// old leader may be unavailable

@@ -14,13 +14,13 @@
  */
 
 #include <QueryPlan/GraphvizPrinter.h>
-
 #include <AggregateFunctions/AggregateFunctionNull.h>
 #include <DataTypes/FieldToDataType.h>
 #include <IO/WriteBufferFromString.h>
 #include <Interpreters/AggregateDescription.h>
 #include <Interpreters/ProcessList.h>
 #include <Interpreters/convertFieldToType.h>
+#include <Interpreters/ProcessList.h>
 #include <Parsers/formatAST.h>
 #include <Processors/printPipeline.h>
 #include <QueryPlan/AggregatingStep.h>
@@ -87,6 +87,7 @@ static std::unordered_map<IQueryPlanStep::Type, std::string> NODE_COLORS = {
     {IQueryPlanStep::Type::ReadStorageRowCount, "deepskyblue"},
     {IQueryPlanStep::Type::Values, "deepskyblue"},
     {IQueryPlanStep::Type::Limit, "gray83"},
+    {IQueryPlanStep::Type::Offset, "gray83"},
     {IQueryPlanStep::Type::LimitBy, "gray83"},
     {IQueryPlanStep::Type::Filling, "gray83"},
     {IQueryPlanStep::Type::Sorting, "aliceblue"},
@@ -337,6 +338,15 @@ Void PlanNodePrinter::visitLimitNode(LimitNode & node, PrinterContext & context)
     auto step = *node.getStep();
     String color{NODE_COLORS[step.getType()]};
     printNode(node, label, StepPrinter::printLimitStep(step), color, context);
+    return visitChildren(node, context);
+}
+
+Void PlanNodePrinter::visitOffsetNode(OffsetNode & node, PrinterContext & context)
+{
+    String label{"OffsetNode"};
+    auto step = *node.getStep();
+    String color{NODE_COLORS[step.getType()]};
+    printNode(node, label, StepPrinter::printOffsetStep(step), color, context);
     return visitChildren(node, context);
 }
 
@@ -862,6 +872,16 @@ Void PlanSegmentNodePrinter::visitLimitNode(QueryPlan::Node * node, PrinterConte
     return visitChildren(node, context);
 }
 
+Void PlanSegmentNodePrinter::visitOffsetNode(QueryPlan::Node * node, PrinterContext & context)
+{
+    auto & stepPtr = node->step;
+    String label{"OffsetNode"};
+    auto & step = dynamic_cast<const OffsetStep &>(*stepPtr);
+    String color{NODE_COLORS[stepPtr->getType()]};
+    printNode(node, label, StepPrinter::printOffsetStep(step), color, context);
+    return visitChildren(node, context);
+}
+
 Void PlanSegmentNodePrinter::visitLimitByNode(QueryPlan::Node * node, PrinterContext & context)
 {
     auto & stepPtr = node->step;
@@ -1070,16 +1090,16 @@ void PlanSegmentNodePrinter::printNode(
     if (with_id)
         out << "|" << node->id;
 
-    //    if (node.getStatistics().isDerived())
-    //    {
-    //        out << "|";
-    //        out << "Stats \\n";
-    //        auto statistics = node.getStatistics();
-    //        if (statistics)
-    //            out << statistics.value()->toString();
-    //        else
-    //            out << "None";
-    //    }
+//    if (node.getStatistics().isDerived())
+//    {
+//        out << "|";
+//        out << "Stats \\n";
+//        auto statistics = node.getStatistics();
+//        if (statistics)
+//            out << statistics.value()->toString();
+//        else
+//            out << "None";
+//    }
 
     String style = context.is_magic ? "rounded, filled, dashed" : "rounded, filled";
 
@@ -1303,7 +1323,7 @@ String StepPrinter::printJoinStep(const JoinStep & step)
     if (!PredicateUtils::isTruePredicate(step.getFilter()))
     {
         details << "JoinFilter\\n";
-        details << step.getFilter()->getColumnName();
+        // details << step.getFilter()->getColumnName();
         details << "|";
     }
     details << inequality(step.getAsofInequality());
@@ -1377,14 +1397,14 @@ String StepPrinter::printAggregatingStep(const AggregatingStep & step, bool incl
         details << key << "\\n";
     }
     details << "|";
-    
+
     details << "KeysNotHashed:\\n";
     for (const auto & key : step.getKeysNotHashed())
     {
         details << key << "\\n";
     }
     details << "|";
-    
+
     details << "Functions:\\n";
     const AggregateDescriptions & descs = step.getAggregates();
     for (const auto & desc : descs)
@@ -1928,6 +1948,22 @@ String StepPrinter::printLimitStep(const LimitStep & step)
                 << " Partial";
     return details.str();
 }
+
+String StepPrinter::printOffsetStep(const OffsetStep & step)
+{
+    std::stringstream details;
+    auto offset = step.getOffset();
+    details << "Offset:" << offset;
+    details << "|";
+    details << "Output\\n";
+    for (const auto & column : step.getOutputStream().header)
+    {
+        details << column.name << ":";
+        details << column.type->getName() << "\\n";
+    }
+    return details.str();
+}
+
 String StepPrinter::printLimitByStep(const LimitByStep & step)
 {
     std::stringstream details;
@@ -2486,16 +2522,21 @@ void GraphvizPrinter::printAST(const ASTPtr & astPtr, ContextMutablePtr & contex
 {
     if (context->getSettingsRef().print_graphviz && context->getSettingsRef().print_graphviz_ast)
     {
+        auto const graphviz = GraphvizPrinter::printAST(astPtr);
+
         std::stringstream path;
         path << context->getSettingsRef().graphviz_path.toString();
         path << visitor << "-" << context->getInitialQueryId() << ".dot";
         std::ofstream out(path.str());
-        out << GraphvizPrinter::printAST(astPtr);
+        out << graphviz;
         out.close();
 
         // QueryStatus * process_list_elem = context->getProcessListElement();
         // if (process_list_elem)
         //     process_list_elem->addGraphviz(visitor, graphviz);
+
+        QueryStatus * process_list_elem = context->getProcessListElement();
+        process_list_elem->addGraphviz(visitor, graphviz);
     }
 }
 
@@ -2503,6 +2544,8 @@ void GraphvizPrinter::printLogicalPlan(PlanNodeBase & root, ContextMutablePtr & 
 {
     if (context->getSettingsRef().print_graphviz)
     {
+        auto const graphviz = GraphvizPrinter::printLogicalPlan(root);
+
         cleanDotFiles(context);
 
         std::stringstream path;
@@ -2510,12 +2553,14 @@ void GraphvizPrinter::printLogicalPlan(PlanNodeBase & root, ContextMutablePtr & 
         path << context->getExecuteSubQueryPath() << name << "-" << context->getInitialQueryId() << ".dot";
 
         std::ofstream out(path.str());
-        out << GraphvizPrinter::printLogicalPlan(root);
+        out << graphviz;
         out.close();
 
         // QueryStatus * process_list_elem = context->getProcessListElement();
         // if (process_list_elem)
         //     process_list_elem->addGraphviz(name, graphviz);
+        QueryStatus * process_list_elem = context->getProcessListElement();
+        process_list_elem->addGraphviz(name, graphviz);
     }
 }
 
@@ -2524,7 +2569,7 @@ void GraphvizPrinter::printLogicalPlan(
 {
     if (context->getSettingsRef().print_graphviz)
     {
-        auto const graphviz = GraphvizPrinter::printLogicalPlan(*plan.getPlanNode(), &plan.getCTEInfo(), profiles);
+        auto const graphviz = GraphvizPrinter::printLogicalPlan(*plan.getPlanNode(), &plan.getCTEInfo());
         cleanDotFiles(context);
 
         std::stringstream path;
@@ -2532,8 +2577,11 @@ void GraphvizPrinter::printLogicalPlan(
         path << context->getExecuteSubQueryPath() << name << "-" << context->getInitialQueryId() << ".dot";
 
         std::ofstream out(path.str());
-        out << GraphvizPrinter::printLogicalPlan(*plan.getPlanNode(), &plan.getCTEInfo());
+        out << graphviz;
         out.close();
+
+        QueryStatus * process_list_elem = context->getProcessListElement();
+        process_list_elem->addGraphviz(name, graphviz);
     }
 }
 
@@ -2544,12 +2592,13 @@ void GraphvizPrinter::printPipeline(
     {
         cleanDotFiles(context);
         {
+            auto const graphviz = printGroupedPipeline(processors, graph);
             std::stringstream path;
             path << context->getSettingsRef().graphviz_path.toString();
             path << context->getExecuteSubQueryPath() << PIPELINE_PATH << "-grouped"
                  << "-" << context->getInitialQueryId() << "_" << segment_id << "_" << host << ".dot";
             std::ofstream out(path.str());
-            out << printGroupedPipeline(processors, graph);
+            out << graphviz;
             out.close();
 
             std::stringstream name;
@@ -2557,14 +2606,22 @@ void GraphvizPrinter::printPipeline(
             // QueryStatus * process_list_elem = context->getProcessListElement();
             // if (process_list_elem)
             //     process_list_elem->addGraphviz(name.str(), graphviz);
+            QueryStatus * process_list_elem = context->getProcessListElement();
+            process_list_elem->addGraphviz(name.str(), graphviz);
         }
         {
+            auto const graphviz = printPipeline(processors, graph);
             std::stringstream path;
             path << context->getSettingsRef().graphviz_path.toString();
             path << context->getExecuteSubQueryPath() << PIPELINE_PATH << "-" << context->getInitialQueryId() << "_" << segment_id << "_" << host << ".dot";
             std::ofstream out(path.str());
-            out << printPipeline(processors, graph);
+            out << graphviz;
             out.close();
+
+            std::stringstream name;
+            name << PIPELINE_PATH << "_" << segment_id << "_" << host;
+            QueryStatus * process_list_elem = context->getProcessListElement();
+            process_list_elem->addGraphviz(name.str(), graphviz);
         }
     }
 }
@@ -2851,6 +2908,7 @@ void GraphvizPrinter::printMemo(const Memo & memo, GroupId root_id, const Contex
 {
     if (context->getSettingsRef().print_graphviz)
     {
+        auto const graphviz = GraphvizPrinter::printMemo(memo, root_id);
         cleanDotFiles(context);
 
         std::stringstream path;
@@ -2858,8 +2916,11 @@ void GraphvizPrinter::printMemo(const Memo & memo, GroupId root_id, const Contex
         path << context->getExecuteSubQueryPath() << name << "-" << context->getInitialQueryId() << ".dot";
 
         std::ofstream out(path.str());
-        out << GraphvizPrinter::printMemo(memo, root_id);
+        out << graphviz;
         out.close();
+
+        QueryStatus * process_list_elem = context->getProcessListElement();
+        process_list_elem->addGraphviz(name, graphviz);
     }
 }
 
@@ -2867,6 +2928,7 @@ void GraphvizPrinter::printPlanSegment(const PlanSegmentTreePtr & segment, const
 {
     if (context->getSettingsRef().print_graphviz)
     {
+
         cleanDotFiles(context);
 
         std::stringstream path;
@@ -2874,8 +2936,12 @@ void GraphvizPrinter::printPlanSegment(const PlanSegmentTreePtr & segment, const
         path << context->getExecuteSubQueryPath() + "4000-PlanSegment"
              << "-" << context->getInitialQueryId() << ".dot";
         std::ofstream out(path.str());
-        out << GraphvizPrinter::printPlanSegmentNodes(segment, context);
+        auto const graphviz = GraphvizPrinter::printPlanSegmentNodes(segment, context);
+        out << graphviz;
         out.close();
+
+        QueryStatus * process_list_elem = context->getProcessListElement();
+        process_list_elem->addGraphviz("4000-PlanSegment", graphviz);
     }
 }
 
@@ -3431,20 +3497,22 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
 
     if (group.isMagic())
     {
-        out << "<TR><TD COLSPAN=\"3\">Magic</TD></TR>";
+        out << "<TR><TD COLSPAN=\"3\">MagicSet</TD></TR>";
     }
 
     for (const auto & join_set : group.getJoinSets())
     {
-        out << "<TR><TD COLSPAN=\"3\">Magic";
-        if (join_set.getGroups().size() > 1)
+        if (join_set.getGroups().size() <= 1)
+            continue;
+
+        out << "<TR><TD COLSPAN=\"3\">JoinSet: ";
+        for (size_t i = 0; i < join_set.getGroups().size(); i++)
         {
-            for (const auto group_id : join_set.getGroups())
-            {
-                out << group_id << ",";
-            }
-            out << "; ";
+            if (i != 0)
+                out << ",";
+            out << join_set.getGroups()[i];
         }
+        out << "; ";
         out << "</TD></TR>";
     }
 
@@ -3453,9 +3521,9 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
         out << "<TR><TD COLSPAN=\"3\">";
         if (group.getStatistics())
         {
-            // auto stats = escapeSpecialCharacters(group.getStatistics().value()->toString());
-            // boost::replace_all(stats, "\\n", "<BR/>");
-            // out << stats;
+            auto stats = escapeSpecialCharacters(group.getStatistics().value()->toString());
+            boost::replace_all(stats, "\\n", "<BR/>");
+            out << stats;
         }
         else
         {
@@ -3509,6 +3577,10 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
                 if (partitioning.isEnforceRoundRobin())
                 {
                     result += " RoundR";
+                }
+                if (partitioning.isRequireHandle())
+                {
+                    result += " handle";
                 }
                 return result;
             }

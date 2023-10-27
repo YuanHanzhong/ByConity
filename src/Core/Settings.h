@@ -236,8 +236,8 @@ enum PreloadLevelSettings : UInt64
     M(String, s3_access_key_id, "", "S3 table access key id", 0) \
     M(String, s3_access_key_secret, "", "S3 table access key secret", 0) \
     M(Bool, s3_use_read_ahead, true, "Enable read ahead buffer when read s3, now it is just for CnchS3", 0) \
-    M(Bool, overwrite_current_file, false, "Enable overwrite current file, nou it is just for CnchS3/CnchHDFS", 0) \
-    M(Bool, insert_new_file, true, "Create new file when write data into the file, nou it is just for CnchS3/CnchHDFS", 0) \
+    M(Bool, overwrite_current_file, false, "Enable overwrite current file, now it is just for CnchS3/CnchHDFS", 0) \
+    M(Bool, insert_new_file, true, "Create new file when write data into the file, now it is just for CnchS3/CnchHDFS", 0) \
     M(Bool, extremes, false, "Calculate minimums and maximums of the result columns. They can be output in JSON-formats.", IMPORTANT) \
     M(Bool, use_uncompressed_cache, false, "Whether to use the cache of uncompressed blocks.", 0) \
     M(Bool, replace_running_query, false, "Whether the running request should be canceled with the same id as the new one.", 0) \
@@ -887,12 +887,13 @@ enum PreloadLevelSettings : UInt64
       "Whether to retry when worker failures are detected when allocating metadata during query execution.", \
       0) \
     M(Bool, enable_partition_prune, true, "prune partition based on where expression analysis.", 0) \
-    M(Bool, \
-      restore_table_expression_in_distributed, \
-      1, \
-      "restore table expressions in distributed query to pass current database to remote query.", \
-      0) \
-\
+    M(Bool, restore_table_expression_in_distributed, 1, "restore table expressions in distributed query to pass current database to remote query.", 0) \
+    \
+    /**  settings about bitmap index */\
+    M(Bool, enable_ab_index_optimization, true, "Optimize ab version by reading Bitmap", 0)\
+    M(Bool, enable_sync_build_bitmap, false, "Build bitmap index in sync mode", 0)\
+    M(Bool, enable_async_build_bitmap_in_attach, false, "Async build bitmap index in attach, it is a user config", 0)\
+    \
     /** Limits during query execution are part of the settings. \
       * Used to provide a more safe execution of queries from the user interface. \
       * Basically, limits are checked for each block (not every row). That is, the limits can be slightly violated. \
@@ -931,6 +932,9 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, max_rows_to_read_local, 0, "Limit max reading rows for each local shard. The same ", 0) \
     M(UInt64, max_bytes_to_read_local, 0, "Limit max reading bytes for each local shard.", 0) \
     M(OverflowMode, read_overflow_mode_local, OverflowMode::THROW, "What to do when the limit is exceeded.", 0) \
+    \
+    /** Just for compatible, totally the same with settings above */ \
+    M(Bool, allow_experimental_multiple_joins_emulation, true, "Emulate multiple joins using subselects", 0) \
     \
     M(UInt64, max_query_cpu_seconds, 0, "Limit the maximum amount of CPU resources such a query segment can consume.", 0) \
     M(UInt64, max_distributed_query_cpu_seconds, 0, "Limit the maximum amount of CPU resources such a distribute query can consume.", 0) \
@@ -1550,6 +1554,8 @@ enum PreloadLevelSettings : UInt64
     M(Bool, snappy_format_blocked, false, "Using blocked decompress flow for Snappy input", 0) \
     M(String, vw, "", "The vw name set by user on which the query run without tenant information", 0) \
     M(String, virtual_warehouse, "", "The vw name set by user on which the query run", 0) \
+    M(String, backup_virtual_warehouse, "", "The backup vw to run query when default vw is not avaiable", 0) \
+    M(BackupVWMode, backup_vw_mode, BackupVWMode::BACKUP, "backup vw mode. backup round_robin backup_only", 0) \
     M(String, virtual_warehouse_write, "", "The write vw name set by user on which the query run", 0) \
     M(String, \
       vw_schedule_algo, \
@@ -1637,7 +1643,8 @@ enum PreloadLevelSettings : UInt64
       0) \
     M(Seconds, query_cache_ttl, 60, "After this time in seconds entries in the query cache become stale", 0) \
     M(Bool, query_cache_share_between_users, false, "Allow other users to read entry in the query cache", 0) \
-\
+    M(Bool, create_view_check_column_names, true, "When executing CREATE VIEW queries, whether check column names are consistent with select query", 0) \
+    \
     /** settings in cnch **/ \
     M(Seconds, drop_range_memory_lock_timeout, 5, "The time that spend on wait for memory lock when doing drop range", 0) \
     M(UInt64, cnch_data_retention_time_in_sec, 3*24*60*60, "Waiting time when dropped table or database is actually removed.", 0) \
@@ -1681,19 +1688,9 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_query_level_profiling, false, "Enable profiling at query and operator level", 0) \
     M(Bool, enable_kafka_log_profiling, false, "Enable query profiling for cnch_kafka_log table", 0) \
     M(Bool, enable_query_metrics_tables_profiling, false, "Enable query profiling for query_metrics and query worker_metrics tables", 0) \
-    M(Bool, enable_preload_parts, false, "Enable preload parts", 0) \
-    M(Bool, enable_async_preload_parts, true, "Allow to preload data parts asynchronously", 0) \
-    M(UInt64, \
-      cloud_task_auto_stop_timeout, \
-      60, \
-      "We will remove this task when heartbeat can't find this task more than retries_count times.", \
-      0) \
-    M(UInt64, \
-      parts_preload_level, \
-      1, \
-      "used for global preload(manual alter&table auto), 0=close preload;1=preload meta;2=preload data;3=preload meta&data, Note: for " \
-      "table auto preload, 0 will disable all table preload, > 0 will use table preload setting", \
-      0) \
+    M(UInt64, cloud_task_auto_stop_timeout, 60, "We will remove this task when heartbeat can't find this task more than retries_count times.", 0)\
+    M(UInt64, parts_preload_level, 1, "used for global preload(manual alter&table auto), 0=close preload;1=preload meta;2=preload data;3=preload meta&data, Note: for table auto preload, 0 will disable all table preload, > 0 will use table preload setting", 0) \
+    M(UInt64, parts_preload_throttler, 0, "used for max preload rpc concurrent count", 0) \
     M(DiskCacheMode, disk_cache_mode, DiskCacheMode::AUTO, "Whether to use local disk cache", 0) \
     M(Bool, enable_vw_customized_setting, false, "Allow vw customized overwrite profile settings", 0) \
     M(Bool, enable_async_execution, false, "Whether to enable async execution", 0) \
@@ -1770,6 +1767,8 @@ enum PreloadLevelSettings : UInt64
       "Enable the dictioanry compression and decompression when performing a query (deprecated setting).", \
       0) \
     M(Bool, enable_rewrite_alias_in_select, true, "Whether rewrite alias in select (Obsolete setting).", 0) \
+    M(Bool, enable_replace_group_by_literal_to_symbol, false, "Obsolete setting, does nothing.", 0) \
+    M(Bool, enable_replace_order_by_literal_to_symbol, false, "Obsolete setting, does nothing.", 0) \
     /** Ingestion */ \
     M(Seconds, ingest_column_memory_lock_timeout, 5, "The time that spend on wait for memory lock", 0) \
     M(UInt64, max_ingest_columns_size, 10, "The maximum number of columns that can be ingested.", 0) \
@@ -1804,6 +1803,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_optimizer_fallback, true, "Whether enable query optimizer fallback when failed", 0) \
     M(Bool, log_optimizer_run_time, false, "Whether Log optimizer runtime", 0) \
     M(UInt64, plan_optimizer_timeout, 600000, "Max running time of a plan rewriter optimizer in ms", 0) \
+    M(UInt64, plan_optimizer_rule_warning_time, 1000, "Send warning if a optimize rule optimize time exceed timeout", 0) \
     M(Bool, enable_plan_cache, false, "Whether enable plan cache", 0) \
     M(UInt64, max_plannode_count, 200, "The max plannode count", 0) \
     M(Bool, enable_memory_catalog, false, "Enable memory catalog for unittest", 0) \
@@ -1818,8 +1818,6 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_nested_loop_join, true, "Whether enable nest loop join for outer join with filter", 0)\
     M(Bool, enforce_all_join_to_any_join, false, "Whether enforce all join to any join", 0) \
     M(Bool, enable_implicit_type_conversion, true, "Whether enable implicit type conversion for JOIN, Set operation, IN subquery", 0) \
-    M(Bool, enable_replace_group_by_literal_to_symbol, false, "Replace group by literal to symbol", 0) \
-    M(Bool, enable_replace_order_by_literal_to_symbol, false, "Replace order by literal to symbol", 0) \
     M(Bool, rewrite_like_function, true, "Rewrite simple pattern like function", 0) \
     M(UInt64, iterative_optimizer_timeout, 10000, "Max running time of a single iterative optimizer in ms", 0) \
     M(Bool, debug_iterative_optimizer, false, "If enabled, iterative optimizer will print plan after each rule application", 0) \
@@ -1975,6 +1973,7 @@ enum PreloadLevelSettings : UInt64
     M(Bool, enable_equivalences, true, "Whether enable using equivalences when property match", 0) \
     M(Bool, enable_injective_in_property, false, "Whether enable using injective function when property match", 0) \
     M(UInt64, max_expand_join_key_size, 3, "Whether enable using equivalences when property match", 0) \
+    M(UInt64, max_expand_agg_key_size, 3, "Max allowed agg/window keys number when expand powerset when property match", 0) \
     M(Bool, enable_sharding_optimize, false, "Whether enable sharding optimization, eg. local join", 0) \
     M(Bool, enable_magic_set, true, "Whether enable magic set rewriting for join aggregation", 0) \
     M(Float, magic_set_filter_factor, 0.5, "The minimum filter factor of magic set, used for early pruning", 0) \
@@ -2272,7 +2271,6 @@ enum PreloadLevelSettings : UInt64
     M(UInt64, cnch_merge_prefetch_segment_size, 256 * 1024 * 1024, "Min segment size of file when prefetching for merge", 0) \
     M(Bool, offloading_with_query_plan, false, "utilize query plan to offload the computation comoetely to worker", 0) \
     M(Seconds, access_entity_ttl, 60 * 60, "TTL for access entities stored in memory in seconds", 0) \
-    M(Bool, enable_auto_query_forwarding, true, "Auto forward query to target server when having multiple servers", 0) \
 \
     M(String, s3_ak_id, "", "The access_key set by user when accessing ve s3.", 0) \
     M(String, s3_ak_secret, "", "The secret_key set by user when accessing ve s3.", 0) \
@@ -2280,9 +2278,20 @@ enum PreloadLevelSettings : UInt64
     M(String, s3_endpoint, "", "The endpoint set by user when accessing ve s3.", 0) \
 \
     M(Bool, enable_cache_reader_buffer_reuse, false, "Decpreated settings, only a place holder", 0) \
-    M(Bool, merge_partition_stats, false, "merge all partition stats", 0) \
-    M(Bool, enable_three_part_identifier, true, "merge all partition stats", 0) \
-    M(String, default_catalog, "", "current catalog", 0)
+    M(Bool, enable_auto_query_forwarding, true, "Auto forward query to target server when having multiple servers", 0) \
+    \
+    M(Bool, merge_partition_stats,false, "merge all partition stats",0 ) \
+    M(Bool, enable_three_part_identifier, true, "merge all partition stats",0 ) \
+    M(String, default_catalog, "", "current catalog",0 ) \
+    \
+    /** BitEngine related settings */ \
+    M(Bool, use_encoded_bitmap, true, "Whether to read the encoded bitmap column", 0) \
+    M(Bool, enable_parallel_bitengine_recode, false, "Whether to encode bitengine in parallel.", 0)  \
+    M(Bool, bitengine_encode_without_lock, false, "Whether to encode bitengine without lock.", 0) \
+    M(Bool, bitengine_encode_fast_mode, false, "Whether to encode bitengine in parallel but with a ZooKeeper lock. It's used for BitEngineDictionary::encodeFast.", 0) \
+    M(UInt64, max_parallel_threads_for_bitengine_recode, 10, "The maximum number of threads to recode bitengine parts", 0) \
+    /** End of BitEngine related settings */
+
 
 // End of FORMAT_FACTORY_SETTINGS
 // Please add settings non-related to formats into the COMMON_SETTINGS above.

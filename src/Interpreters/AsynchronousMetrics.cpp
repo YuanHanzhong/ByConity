@@ -34,7 +34,6 @@
 #include <Storages/StorageMergeTree.h>
 #include <Storages/StorageReplicatedMergeTree.h>
 #include <Storages/MergeTree/ChecksumsCache.h>
-#include <Storages/CnchStorageCache.h>
 #include <Storages/PartCacheManager.h>
 #include <Storages/MergeTree/DeleteBitmapCache.h>
 #include <Storages/UniqueKeyIndexCache.h>
@@ -43,7 +42,8 @@
 #include <IO/ReadHelpers.h>
 #include <Databases/IDatabase.h>
 #include <chrono>
-
+#include <Storages/DiskCache/DiskCacheFactory.h>
+#include <Storages/DiskCache/IDiskCache.h>
 
 #if !defined(ARCADIA_BUILD)
 #    include "config_core.h"
@@ -550,19 +550,14 @@ void AsynchronousMetrics::update(std::chrono::system_clock::time_point update_ti
     }
 
     {
-        if (auto part_cache_manager = getContext()->getPartCacheManager())
+        if (auto cache_manager = getContext()->getPartCacheManager())
         {
-            auto part_cache_metrics = part_cache_manager->dumpPartCache();
+            auto part_cache_metrics = cache_manager->dumpPartCache();
+            auto storage_cache_metrics = cache_manager->dumpStorageCache();
             new_values["CnchPartCachePartitions"] = part_cache_metrics.first;
             new_values["CnchPartCacheParts"] = part_cache_metrics.second;
-        }
-    }
-
-    {
-        if (auto storage_cache = getContext()->getCnchStorageCache())
-        {
-            new_values["CnchStorageCacheBytes"] = storage_cache->weight();
-            new_values["CnchStorageCacheTables"] = storage_cache->count();
+            new_values["CnchStorageCacheTables"] = storage_cache_metrics.first;
+            new_values["CnchStorageCacheBytes"] = storage_cache_metrics.second;
         }
     }
 
@@ -587,6 +582,56 @@ void AsynchronousMetrics::update(std::chrono::system_clock::time_point update_ti
         {
             new_values["UniqueKeyIndexBlockCapacityBytes"] = uniquekey_index_block_cache->TotalCapacity();
             new_values["UniqueKeyIndexBlockCacheBytes"] = uniquekey_index_block_cache->TotalCharge();
+        }
+    }
+
+    {
+        auto merge_tree_disk_cache = DiskCacheFactory::instance().get(DiskCacheType::MergeTree);
+        if (!merge_tree_disk_cache->supportMultiDiskCache())
+        {
+            new_values["MergeTreeDiskCacheFiles"] = merge_tree_disk_cache->getKeyCount();
+            new_values["MergeTreeDiskCacheBytes"] = merge_tree_disk_cache->getCachedSize();
+        }
+        else
+        {
+            new_values["MergeTreeDiskCacheMetaFiles"] = merge_tree_disk_cache->getMetaCache()->getKeyCount();
+            new_values["MergeTreeDiskCacheMetaBytes"] = merge_tree_disk_cache->getMetaCache()->getCachedSize();
+            new_values["MergeTreeDiskCacheDataFiles"] = merge_tree_disk_cache->getDataCache()->getKeyCount();
+            new_values["MergeTreeDiskCacheDataBytes"] = merge_tree_disk_cache->getDataCache()->getCachedSize();
+        }
+
+        auto hive_disk_cache = DiskCacheFactory::instance().tryGet(DiskCacheType::Hive);
+        if (hive_disk_cache)
+        {
+            if (!hive_disk_cache->supportMultiDiskCache())
+            {
+                new_values["HiveDiskCacheFiles"] = hive_disk_cache->getKeyCount();
+                new_values["HiveDiskCacheBytes"] = hive_disk_cache->getCachedSize();
+            }
+            else
+            {
+                new_values["HiveDiskCacheMetaFiles"] = hive_disk_cache->getMetaCache()->getKeyCount();
+                new_values["HiveDiskCacheMetaBytes"] = hive_disk_cache->getMetaCache()->getCachedSize();
+                new_values["HiveDiskCacheDataFiles"] = hive_disk_cache->getDataCache()->getKeyCount();
+                new_values["HiveDiskCacheDataBytes"] = hive_disk_cache->getDataCache()->getCachedSize();
+            }
+        }
+
+        auto file_disk_cache = DiskCacheFactory::instance().tryGet(DiskCacheType::File);
+        if (file_disk_cache)
+        {
+            if (file_disk_cache->supportMultiDiskCache())
+            {
+                new_values["FileDiskCacheFiles"] = file_disk_cache->getKeyCount();
+                new_values["FileDiskCacheBytes"] = file_disk_cache->getCachedSize();
+            }
+            else
+            {
+                new_values["FileDiskCacheMetaFiles"] = file_disk_cache->getMetaCache()->getKeyCount();
+                new_values["FileDiskCacheMetaBytes"] = file_disk_cache->getMetaCache()->getCachedSize();
+                new_values["FileDiskCacheDataFiles"] = file_disk_cache->getDataCache()->getKeyCount();
+                new_values["FileDiskCacheDataBytes"] = file_disk_cache->getDataCache()->getCachedSize();
+            }
         }
     }
 

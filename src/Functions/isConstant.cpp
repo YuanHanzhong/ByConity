@@ -27,6 +27,8 @@ public:
 
     bool useDefaultImplementationForNulls() const override { return false; }
 
+    bool useDefaultImplementationForNothing() const override { return false; }
+
     size_t getNumberOfArguments() const override
     {
         return 1;
@@ -46,7 +48,7 @@ public:
 
 }
 
-void registerFunctionIsConstant(FunctionFactory & factory)
+REGISTER_FUNCTION(IsConstant)
 {
     factory.registerFunction<FunctionIsConstant>();
 }

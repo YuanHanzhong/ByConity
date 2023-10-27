@@ -612,6 +612,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
             step->getJoinAlgorithm(),
             step->isMagic(),
             step->isOrdered(),
+            step->isSimpleReordered(),
             step->getRuntimeFilterBuilders(),
             step->getHints());
     }
@@ -634,6 +635,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
             step->getJoinAlgorithm(),
             step->isMagic(),
             step->isOrdered(),
+            step->isSimpleReordered(),
             step->getRuntimeFilterBuilders(),
             step->getHints());
     }
@@ -664,6 +666,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
             join_step->getJoinAlgorithm(),
             join_step->isMagic(),
             step->isOrdered(),
+            step->isSimpleReordered(),
             step->getRuntimeFilterBuilders(),
             step->getHints());
         join_node = std::make_shared<JoinNode>(
@@ -883,7 +886,8 @@ PlanNodePtr PredicateVisitor::visitCTERefNode(CTERefNode & node, PredicateContex
             std::vector<ConstASTPtr> common_filters;
             for (const auto & cte_ref : cte_refs)
             {
-                auto mapper = SymbolMapper::symbolMapper(cte_ref.first->getOutputColumns());
+                auto mapping = cte_ref.first->getOutputColumns();
+                auto mapper = SymbolMapper::simpleMapper(mapping);
                 auto mapped_filter = mapper.map(cte_ref.second);
                 common_filters.emplace_back(mapped_filter);
             }

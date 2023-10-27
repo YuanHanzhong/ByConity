@@ -148,7 +148,7 @@ private:
     // void analyzeInterestEvents(ASTSelectQuery & select_query);
     void analyzeHaving(ASTSelectQuery & select_query, ScopePtr source_scope);
     void analyzeOrderBy(ASTSelectQuery & select_query, ASTs & select_expressions, ScopePtr output_scope);
-    void analyzeLimitBy(ASTSelectQuery & select_query, ScopePtr output_scope);
+    void analyzeLimitBy(ASTSelectQuery & select_query, ASTs & select_expressions, ScopePtr output_scope);
     void analyzeLimitAndOffset(ASTSelectQuery & select_query);
 
     /// utils
@@ -302,7 +302,7 @@ Void QueryAnalyzerVisitor::visitASTSelectQuery(ASTPtr & node, const Void &)
     // analyzeInterestEvents(select_query);
     analyzeHaving(select_query, source_scope);
     analyzeOrderBy(select_query, select_expression, source_scope);
-    analyzeLimitBy(select_query, source_scope);
+    analyzeLimitBy(select_query, select_expression, source_scope);
     analyzeLimitAndOffset(select_query);
     verifyAggregate(select_query, source_scope);
     verifyNoFreeReferencesToLambdaArgument(select_query);
@@ -451,8 +451,11 @@ ScopePtr QueryAnalyzerVisitor::analyzeFrom(ASTTablesInSelectQuery & tables_in_se
     {
         auto & table_element = ast->as<ASTTablesInSelectQueryElement &>();
 
-        if (auto * table_expression = table_element.table_expression->as<ASTTableExpression>())
+        if (table_element.table_expression)
         {
+            auto * table_expression = table_element.table_expression->as<ASTTableExpression>();
+            if (!table_expression)
+                throw Exception("Invalid Table Expression", ErrorCodes::LOGICAL_ERROR);
             auto table_with_alias = extractTableWithAlias(*table_expression);
             return analyzeTableExpression(*table_expression, QualifiedName::extractQualifiedName(table_with_alias));
         }
@@ -468,8 +471,11 @@ ScopePtr QueryAnalyzerVisitor::analyzeFrom(ASTTablesInSelectQuery & tables_in_se
     {
         auto & table_element = tables_in_select.children[idx]->as<ASTTablesInSelectQueryElement &>();
 
-        if (auto * table_expression = table_element.table_expression->as<ASTTableExpression>())
+        if (table_element.table_expression)
         {
+            auto * table_expression = table_element.table_expression->as<ASTTableExpression>();
+            if (!table_expression)
+                throw Exception("Invalid Table Expression", ErrorCodes::LOGICAL_ERROR);
             auto table_with_alias = extractTableWithAlias(*table_expression);
             ScopePtr joined_table_scope = analyzeTableExpression(*table_expression, QualifiedName::extractQualifiedName(table_with_alias));
             auto & table_join = table_element.table_join->as<ASTTableJoin &>();
@@ -523,7 +529,8 @@ ScopePtr QueryAnalyzerVisitor::analyzeTable(ASTTableIdentifier & db_and_table, c
         if (storage_id.getDatabaseName() != "system" &&
             !(dynamic_cast<const MergeTreeMetaBase *>(storage.get())
               || dynamic_cast<const StorageMemory *>(storage.get())
-              || dynamic_cast<const StorageCnchHive *>(storage.get())))
+              || dynamic_cast<const StorageCnchHive *>(storage.get())
+              || dynamic_cast<const IStorageCnchFile *>(storage.get())))
             throw Exception("Only cnch tables & system tables are supported", ErrorCodes::NOT_IMPLEMENTED);
 
         analysis.storage_results[&db_and_table] = StorageAnalysis { storage_id.getDatabaseName(), storage_id.getTableName(), storage};
@@ -1409,7 +1416,7 @@ void QueryAnalyzerVisitor::analyzeGroupBy(ASTSelectQuery & select_query, ASTs & 
 
     if (select_query.groupBy())
     {
-        bool allow_group_by_position = context->getSettingsRef().enable_replace_group_by_literal_to_symbol
+        bool allow_group_by_position = context->getSettingsRef().enable_positional_arguments
             && !select_query.group_by_with_rollup && !select_query.group_by_with_cube && !select_query.group_by_with_grouping_sets;
 
         auto analyze_grouping_set = [&](ASTs & grouping_expr_list)
@@ -1555,7 +1562,7 @@ void QueryAnalyzerVisitor::analyzeOrderBy(ASTSelectQuery & select_query, ASTs & 
         {
             auto & order_elem = order_item->as<ASTOrderByElement &>();
 
-            if (context->getSettingsRef().enable_replace_order_by_literal_to_symbol)
+            if (context->getSettingsRef().enable_positional_arguments)
                 if (auto *literal = order_elem.children.front()->as<ASTLiteral>();
                     literal &&
                     literal->tryGetAlias().empty() &&                   // avoid aliased expr being interpreted as positional argument
@@ -1584,7 +1591,7 @@ void QueryAnalyzerVisitor::analyzeOrderBy(ASTSelectQuery & select_query, ASTs & 
     }
 }
 
-void QueryAnalyzerVisitor::analyzeLimitBy(ASTSelectQuery & select_query, ScopePtr output_scope)
+void QueryAnalyzerVisitor::analyzeLimitBy(ASTSelectQuery & select_query, ASTs & select_expressions, ScopePtr output_scope)
 {
     if (select_query.limitBy())
     {
@@ -1596,13 +1603,35 @@ void QueryAnalyzerVisitor::analyzeLimitBy(ASTSelectQuery & select_query, ScopePt
             .aggregateSupport(ExprAnalyzerOptions::AggregateSupport::ALLOWED)
             .windowSupport(ExprAnalyzerOptions::WindowSupport::ALLOWED);
 
-        for (auto & limit_item: select_query.limitBy()->children)
+        for (auto limit_item : select_query.limitBy()->children)
         {
+            if (context->getSettingsRef().enable_positional_arguments)
+                if (auto * literal = limit_item->as<ASTLiteral>();
+                    literal &&
+                    literal->tryGetAlias().empty() &&                 // avoid aliased expr being interpreted as positional argument
+                                                                        // e.g. SELECT 1 AS a ORDER BY a
+                    literal->value.getType() == Field::Types::UInt64)
+                {
+                    auto index = literal->value.get<UInt64>();
+                    if (index > select_expressions.size() || index < 1)
+                    {
+                        throw Exception("Limit by index is greater than the number of select elements", ErrorCodes::BAD_ARGUMENTS);
+                    }
+                    limit_item = select_expressions[index - 1];
+                }
+
             ExprAnalyzer::analyze(limit_item, output_scope, context, analysis, expr_options);
+            analysis.limit_by_items[&select_query].push_back(limit_item);
         }
 
         auto limit_by_value = analyzeUIntConstExpression(select_query.limitByLength());
         analysis.limit_by_values[&select_query] = limit_by_value;
+
+        if (select_query.getLimitByOffset())
+        {
+            auto limit_by_offset_value = analyzeUIntConstExpression(select_query.getLimitByOffset());
+            analysis.limit_by_offset_values[&select_query] = limit_by_offset_value;
+        }
     }
 }
 
@@ -1904,7 +1933,7 @@ UInt64 QueryAnalyzerVisitor::analyzeUIntConstExpression(const ASTPtr & expressio
 
 void QueryAnalyzerVisitor::countLeadingHint(const IAST & ast)
 {
-    for (auto & hint : ast.hints)
+    for (const auto & hint : ast.hints)
     {
         if (Poco::toLower(hint.getName()) == "leading")
             ++analysis.hint_analysis.leading_hint_count;

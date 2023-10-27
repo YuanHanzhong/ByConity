@@ -29,7 +29,6 @@
 #include <unistd.h>
 #include <Access/AccessControlManager.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
-#include <Catalog/Catalog.h>
 #include <Common/Config/MetastoreConfig.h>
 #include <CloudServices/CnchServerServiceImpl.h>
 #include <CloudServices/CnchWorkerClientPools.h>
@@ -60,7 +59,6 @@
 #include <Interpreters/loadMetadata.h>
 #include <Interpreters/SQLBinding/SQLBindingCache.h>
 #include <Processors/Exchange/DataTrans/Brpc/BrpcExchangeReceiverRegistryService.h>
-#include <QueryPlan/Hints/registerHints.h>
 #include <QueryPlan/PlanCache.h>
 #include <Server/HTTP/HTTPServer.h>
 #include <Server/HTTPHandlerFactory.h>
@@ -125,8 +123,11 @@
 #include <common/logger_useful.h>
 #include <common/phdr_cache.h>
 #include <common/scope_guard.h>
-#include "BrpcServerHolder.h"
 #include "MetricsTransmitter.h"
+#include "BrpcServerHolder.h"
+#include <Catalog/Catalog.h>
+#include <QueryPlan/Hints/registerHints.h>
+#include <Parsers/formatTenantDatabaseName.h>
 
 #include <CloudServices/CnchServerClientPool.h>
 
@@ -565,6 +566,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
 
     global_context->initCnchConfig(config());
     global_context->initRootConfig(config());
+    global_context->initPreloadThrottler();
     const auto & root_config = global_context->getRootConfig();
 
 
@@ -634,6 +636,8 @@ int Server::main(const std::vector<std::string> & /*args*/)
 
         // global_context->initTestLog();
     }
+
+    global_context->initTSOElectionReader();
 
     bool has_zookeeper = config().has("zookeeper");
 
@@ -1081,7 +1085,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
     /// Size of cache for marks (index of MergeTree family of tables). It is mandatory.
     size_t mark_cache_size = config().getUInt64("mark_cache_size");
     if (!mark_cache_size)
-        LOG_ERROR(log, "Too low mark cache size will lead to severe performance degradation.");
+        LOG_ERROR(log, "Too low mark cache size will lead to server performance degradation.");
     if (mark_cache_size > max_cache_size)
     {
         mark_cache_size = max_cache_size;
@@ -1206,7 +1210,19 @@ int Server::main(const std::vector<std::string> & /*args*/)
     }
 
     /// Disk cache for unique key index
-    size_t unique_key_index_file_cache_size = config().getUInt64("unique_key_index_disk_cache_max_bytes", 53687091200); /// 50GB
+    size_t uki_disk_cache_max_bytes = 50 * 1024 * 1024 * 1024; // 50GB
+    for (const auto & [name, disk] : global_context->getDisksMap())
+    {
+        if (disk->getType() == DiskType::Type::Local && disk->getPath() == global_context->getPath())
+        {
+            Poco::File disk_path(disk->getPath());
+            if (!disk_path.canRead() || !disk_path.canWrite())
+                throw Exception("There is no RW access to disk " + name + " (" + disk->getPath() + ")", ErrorCodes::PATH_ACCESS_DENIED);
+            uki_disk_cache_max_bytes = std::min<size_t>(0.25 * disk->getAvailableSpace(), uki_disk_cache_max_bytes);
+            break;
+        }
+    }
+    size_t unique_key_index_file_cache_size = config().getUInt64("unique_key_index_disk_cache_max_bytes", uki_disk_cache_max_bytes);
     global_context->setUniqueKeyIndexFileCache(unique_key_index_file_cache_size);
 
 #if USE_EMBEDDED_COMPILER
@@ -1264,15 +1280,6 @@ int Server::main(const std::vector<std::string> & /*args*/)
         else
         {
             LOG_WARNING(log, "Disable cnch part cache, which is strongly suggested for product use, since disable it may bring significant performace issue.");
-        }
-        if (config().getBool("enable_cnch_storage_cache", true))
-        {
-            LOG_INFO(log, "Init cnch storage cache.");
-            global_context->setCnchStorageCache(settings.cnch_max_cached_storage);
-        }
-        else
-        {
-            LOG_WARNING(log, "Disable cnch storage cache, which is strongly suggested for product use, since disable it may bring performace issue.");
         }
 
         /// only server need start up server manager
@@ -1491,7 +1498,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
                     port_name,
                     "http://" + address.toString(),
                     std::make_unique<HTTPServer>(
-                        context(), createHandlerFactory(*this, async_metrics, "HTTPHandler-factory"), server_pool, socket, http_params));
+                        context(), createHandlerFactory(*this, async_metrics, "HTTPHandler-factory", context()), server_pool, socket, http_params));
             });
 
             /// HTTPS
@@ -1507,7 +1514,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
                     port_name,
                     "https://" + address.toString(),
                     std::make_unique<HTTPServer>(
-                        context(), createHandlerFactory(*this, async_metrics, "HTTPSHandler-factory"), server_pool, socket, http_params));
+                        context(), createHandlerFactory(*this, async_metrics, "HTTPSHandler-factory", context()), server_pool, socket, http_params));
 #else
                 UNUSED(port);
                 throw Exception{"HTTPS protocol is disabled because Poco library was built without NetSSL support.",
@@ -1588,7 +1595,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
                     "replica communication (interserver): http://" + address.toString(),
                     std::make_unique<HTTPServer>(
                         context(),
-                        createHandlerFactory(*this, async_metrics, "InterserverIOHTTPHandler-factory"),
+                        createHandlerFactory(*this, async_metrics, "InterserverIOHTTPHandler-factory", context()),
                         server_pool,
                         socket,
                         http_params));
@@ -1607,7 +1614,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
                     "secure replica communication (interserver): https://" + address.toString(),
                     std::make_unique<HTTPServer>(
                         context(),
-                        createHandlerFactory(*this, async_metrics, "InterserverIOHTTPSHandler-factory"),
+                        createHandlerFactory(*this, async_metrics, "InterserverIOHTTPSHandler-factory", context()),
                         server_pool,
                         socket,
                         http_params));
@@ -1677,7 +1684,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
                     "Prometheus: http://" + address.toString(),
                     std::make_unique<HTTPServer>(
                         context(),
-                        createHandlerFactory(*this, async_metrics, "PrometheusHandler-factory"),
+                        createHandlerFactory(*this, async_metrics, "PrometheusHandler-factory", context()),
                         server_pool,
                         socket,
                         http_params));
@@ -1710,6 +1717,9 @@ int Server::main(const std::vector<std::string> & /*args*/)
         }
 
         global_context->setEnableSSL(enable_ssl);
+
+        bool enable_tenant_systemdb = config().getBool("enable_tenant_systemdb", true);
+        setEnableTenantSystemDB(enable_tenant_systemdb);
 
         buildLoggers(config(), logger());
 

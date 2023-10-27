@@ -98,6 +98,7 @@ list (REMOVE_ITEM clickhouse_common_io_sources Common/malloc.cpp Common/new_dele
 add_headers_and_sources(dbms Storages/IndexFile)
 add_headers_and_sources(dbms Storages/System)
 add_headers_and_sources(dbms Storages/IngestColumnCnch)
+add_headers_and_sources(dbms Storages/BitEngine)
 add_headers_and_sources(dbms FormaterTool)
 add_headers_and_sources(dbms Transaction)
 add_headers_and_sources(dbms Transaction/Actions)
@@ -151,8 +152,8 @@ add_headers_and_sources(dbms Protos)
 list (APPEND clickhouse_common_io_sources ${CONFIG_BUILD})
 list (APPEND clickhouse_common_io_headers ${CONFIG_VERSION} ${CONFIG_COMMON})
 
-list (APPEND dbms_sources Functions/IFunction.cpp Functions/FunctionFactory.cpp Functions/FunctionHelpers.cpp Functions/extractTimeZoneFromFunctionArguments.cpp Functions/replicate.cpp Functions/FunctionsLogical.cpp)
-list (APPEND dbms_headers Functions/IFunction.h Functions/FunctionFactory.h Functions/FunctionHelpers.h Functions/extractTimeZoneFromFunctionArguments.h Functions/replicate.h Functions/FunctionsLogical.h)
+list (APPEND dbms_sources Functions/IFunction.cpp Functions/FunctionFactory.cpp Functions/FunctionHelpers.cpp Functions/extractTimeZoneFromFunctionArguments.cpp Functions/FunctionsLogical.cpp)
+list (APPEND dbms_headers Functions/IFunction.h Functions/FunctionFactory.h Functions/FunctionHelpers.h Functions/extractTimeZoneFromFunctionArguments.h Functions/FunctionsLogical.h)
 
 list (APPEND dbms_sources
     AggregateFunctions/IAggregateFunction.cpp
@@ -203,6 +204,7 @@ if (USE_JEMALLOC)
 endif()
 
 add_subdirectory(Common/ZooKeeper)
+add_subdirectory(Common/StorageElection)
 add_subdirectory(Common/Config)
 
 set (all_modules)
@@ -409,6 +411,7 @@ target_link_libraries(clickhouse_common_io
             ${LIBNUMA_LIBRARY}
             ipdb
             maxminddb
+            libmetrics2
         PRIVATE
             ${UDNS_LIBRARIES}
 
@@ -449,6 +452,7 @@ dbms_target_link_libraries (
         boost::program_options
         clickhouse_common_config
         clickhouse_common_zookeeper
+        clickhouse_common_storage_election
         clickhouse_dictionaries_embedded
         clickhouse_parsers
         lz4
@@ -665,10 +669,10 @@ if (ENABLE_TESTS AND USE_GTEST)
 
     add_check(unit_tests_dbms)
 endif ()
-    
+
 
 if (ENABLE_BENCHMARK)
-    file(GLOB_RECURSE 
+    file(GLOB_RECURSE
             CLICKHOUSE_BENCHMARK_UTIL_SRCS
             CONFIGURE_DEPENDS
             ${ClickHouse_SOURCE_DIR}/src/benchmark/benchmark_util/*.h
@@ -693,7 +697,7 @@ if (ENABLE_BENCHMARK)
             CXX_EXTENSIONS OFF
             ENABLE_EXPORTS ON
             )
-        
+
         list(APPEND CLICKHOUSE_BENCHMARK ${BENCHMARK_NAME})
     endfunction ()
 

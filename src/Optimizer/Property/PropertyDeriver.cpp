@@ -172,9 +172,10 @@ Property  DeriverVisitor::visitFinalSampleStep(const FinalSampleStep &, DeriverC
     throw Exception("Not impl property deriver", ErrorCodes::NOT_IMPLEMENTED);
 }
 
-Property DeriverVisitor::visitOffsetStep(const OffsetStep &, DeriverContext &)
+Property DeriverVisitor::visitOffsetStep(const OffsetStep &, DeriverContext & context)
 {
-    throw Exception("Not impl property deriver", ErrorCodes::NOT_IMPLEMENTED);
+    return Property{
+        context.getInput()[0].getNodePartitioning(), Partitioning(Partitioning::Handle::SINGLE), context.getInput()[0].getSorting()};
 }
 
 Property DeriverVisitor::visitTotalsHavingStep(const TotalsHavingStep &, DeriverContext & context)
@@ -234,7 +235,9 @@ Property DeriverVisitor::visitProjectionStep(const ProjectionStep & step, Derive
                         if (FunctionIsInjective::isInjective(
                                 item.second, context.getContext(), step.getInputStreams()[0].getNamesAndTypes()))
                         {
-                            return {{Property{Partitioning{Partitioning::Handle::FIXED_HASH, {item.first}}}}};
+                            auto prop = context.getInput()[0];
+                            prop.getNodePartitioningRef().setPartitioningColumns({item.first});
+                            return prop;
                         }
                     }
                     catch (...)

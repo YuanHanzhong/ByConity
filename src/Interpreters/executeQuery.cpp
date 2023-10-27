@@ -22,6 +22,7 @@
 #include <memory>
 #include <Client/Connection.h>
 #include <Interpreters/executeQueryHelper.h>
+#include <Common/HistogramMetrics.h>
 #include <Common/Config/VWCustomizedSettings.h>
 #include <Common/Exception.h>
 #include <Common/HostWithPorts.h>
@@ -114,6 +115,7 @@
 #include <Transaction/TransactionCoordinatorRcCnch.h>
 #include <Transaction/TxnTimestamp.h>
 #include <Common/SensitiveDataMasker.h>
+#include "Interpreters/Context_fwd.h"
 
 #include <Interpreters/DistributedStages/MPPQueryCoordinator.h>
 #include <Interpreters/DistributedStages/MPPQueryManager.h>
@@ -153,6 +155,23 @@ extern const Event FailedSelectQuery;
 extern const Event QueryTimeMicroseconds;
 extern const Event SelectQueryTimeMicroseconds;
 extern const Event InsertQueryTimeMicroseconds;
+extern const Event QueriesFailed;
+extern const Event QueriesFailedBeforeStart;
+extern const Event QueriesFailedWhileProcessing;
+extern const Event QueriesFailedFromUser;
+extern const Event QueriesFailedFromEngine;
+extern const Event QueriesSucceeded;
+extern const Event TimedOutQuery;
+extern const Event Query;
+extern const Event BackupVW;
+}
+
+namespace HistogramMetrics
+{
+extern const Metric QueryLatency;
+extern const Metric UnlimitedQueryLatency;
+extern const Metric QueryIOLatency;
+extern const Metric UnlimitedQueryIOLatency;
 }
 
 namespace DB
@@ -163,6 +182,79 @@ namespace ErrorCodes
     extern const int QUERY_WAS_CANCELLED;
     extern const int CANNOT_PARSE_DOMAIN_VALUE_FROM_STRING;
     extern const int CNCH_QUEUE_QUERY_FAILURE;
+    extern const int UNKNOWN_EXCEPTION;
+}
+
+void trySetVirtualWarehouseWithBackup(ContextMutablePtr & context, const ASTPtr & ast)
+{
+    const auto & backup_vw = context->getSettingsRef().backup_virtual_warehouse.value;
+    if (backup_vw.empty())
+    {
+        trySetVirtualWarehouseAndWorkerGroup(ast, context);
+    }
+    else
+    {
+        std::vector<String> backup_vws;
+        boost::split(backup_vws, backup_vw, boost::is_any_of(","));
+        const auto & backup_vw_mode = context->getSettingsRef().backup_vw_mode;
+        if (backup_vw_mode == BackupVWMode::ROUND_ROBIN)
+        {
+            static std::atomic<uint64_t> round_robin_count{0};
+            auto idx = round_robin_count++ % (1 + backup_vws.size());
+            if (idx == 0)
+            {
+                LOG_DEBUG(&Poco::Logger::get("executeQuery"), "use original vw to execute query");
+                trySetVirtualWarehouseAndWorkerGroup(ast, context);
+            }
+            else
+            {
+                ProfileEvents::increment(ProfileEvents::BackupVW, 1);
+                LOG_DEBUG(&Poco::Logger::get("executeQuery"), "backup round_robin choose {}", backup_vws[idx - 1]);
+                trySetVirtualWarehouseAndWorkerGroup(backup_vws[idx - 1], context);
+            }
+        }
+        else
+        {
+            auto runWithBackupVW = [&]()
+            {
+                for (size_t idx = 0; idx < backup_vws.size(); ++idx)
+                {
+                    const auto & vw = backup_vws[idx];
+                    try
+                    {
+                        trySetVirtualWarehouseAndWorkerGroup(vw, context);
+                        ProfileEvents::increment(ProfileEvents::BackupVW, 1);
+                        LOG_DEBUG(&Poco::Logger::get("executeQuery"), "backup vw choose {}", vw);
+                        break;
+                    }
+                    catch(const Exception & e)
+                    {
+                        if (idx == backup_vws.size() - 1)
+                        {
+                            LOG_DEBUG(&Poco::Logger::get("executeQuery"), "none of backup vws are available");
+                            throw e;
+                        }
+                    }
+                }
+            };
+
+            if (backup_vw_mode == BackupVWMode::BACKUP_ONLY)
+            {
+                runWithBackupVW();
+            }
+            else
+            {
+                try
+                {
+                    trySetVirtualWarehouseAndWorkerGroup(ast, context);
+                }
+                catch(const Exception & e)
+                {
+                    runWithBackupVW();
+                }
+            }
+        }
+    }
 }
 
 void tryQueueQuery(ContextMutablePtr context, ASTType ast_type)
@@ -404,7 +496,47 @@ inline UInt64 time_in_seconds(std::chrono::time_point<std::chrono::system_clock>
     return std::chrono::duration_cast<std::chrono::seconds>(timepoint.time_since_epoch()).count();
 }
 
-static void onExceptionBeforeStart(const String & query_for_logging, ContextMutablePtr context, UInt64 current_time_us, ASTPtr ast)
+static LabelledMetrics::MetricLabels markQueryProfileEventLabels(
+    ContextMutablePtr context,
+    ProcessListQueryType query_type = ProcessListQueryType::Default,
+    std::optional<bool> is_unlimited_query = {})
+{
+    LabelledMetrics::MetricLabels labels{};
+    if (is_unlimited_query)
+    {
+        if (is_unlimited_query.value())
+            labels.insert({"resource_type", "unlimited"});
+        else
+        {
+            if (auto vw = context->tryGetCurrentVW())
+                labels.insert({"vw", vw->getName()});
+            if (auto wg = context->tryGetCurrentWorkerGroup())
+                labels.insert({"wg", wg->getID()});
+            labels.insert({"resource_type", "vw"});
+        }
+    }
+
+    String type = Poco::toLower(String(ProcessListHelper::toString(query_type)));
+    auto sub_query_type = ProcessListSubQueryType::Simple;
+    if (query_type == ProcessListQueryType::Default && context->getSettingsRef().enable_optimizer)
+    {
+        sub_query_type = ProcessListSubQueryType::Complex;
+    }
+    String sub_type = Poco::toLower(String(ProcessListHelper::toString(sub_query_type)));
+    labels.insert({"query_type", type});
+    labels.insert({"sub_query_type", sub_type});
+
+    return labels;
+}
+
+static void onExceptionBeforeStart(
+    const String & query_for_logging,
+    ContextMutablePtr context,
+    UInt64 current_time_us,
+    ASTPtr ast,
+    [[maybe_unused]]int error_code = ErrorCodes::UNKNOWN_EXCEPTION,
+    ProcessListQueryType query_type = ProcessListQueryType::Default,
+    std::optional<bool> is_unlimited_query = {})
 {
     /// Exception before the query execution.
     if (auto quota = context->getQuota())
@@ -504,6 +636,17 @@ static void onExceptionBeforeStart(const String & query_for_logging, ContextMuta
     }
 
     ProfileEvents::increment(ProfileEvents::FailedQuery);
+
+    LabelledMetrics::MetricLabels labels = markQueryProfileEventLabels(context, query_type, is_unlimited_query);
+    labels.insert({"processing_stage", "before-processing"});
+
+    ProfileEvents::increment(ProfileEvents::QueriesFailed, 1, labels);
+
+    //TODO:@lianwenlong add user error codes
+    // if (ErrorCodes::USER_ERRORS.find(error_code) != ErrorCodes::USER_ERRORS.end())
+    //     ProfileEvents::increment(ProfileEvents::QueriesFailedFromUser, 1, labels);
+    // else
+        ProfileEvents::increment(ProfileEvents::QueriesFailedFromEngine, 1, labels);
 
     if (ast)
     {
@@ -741,14 +884,6 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
         {
             ast = input_ast;
         }
-        if (context->getServerType() == ServerType::cnch_server && context->getVWCustomizedSettings())
-        {
-            auto vw_name = tryGetVirtualWarehouseName(ast, context);
-            if (vw_name != EMPTY_VIRTUAL_WAREHOUSE_NAME)
-            {
-                context->getVWCustomizedSettings()->overwriteDefaultSettings(vw_name, context->getSettingsRef());
-            }
-        }
 
         bool in_interactive_txn = isQueryInInteractiveSession(context, ast);
         if (in_interactive_txn && isDDLQuery(context, ast))
@@ -769,11 +904,13 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                 context->getHostWithPorts().toDebugString());
             if (!host_ports.empty() && !isLocalServer(host_ports.getRPCAddress(), std::to_string(context->getRPCPort())))
             {
+                size_t query_size = (max_query_size == 0) ? (end - begin) :  std::min(end - begin, static_cast<ptrdiff_t>(max_query_size));
+                String query = String(begin, begin + query_size);
                 LOG_DEBUG(
-                    &Poco::Logger::get("executeQuery"), "Will reroute query " + queryToString(ast) + " to " + host_ports.toDebugString());
+                    &Poco::Logger::get("executeQuery"), "Will reroute query {} to {}", query, host_ports.toDebugString());
                 context->initializeExternalTablesIfSet();
-                executeQueryByProxy(context, host_ports, ast, res, in_interactive_txn);
-                LOG_DEBUG(&Poco::Logger::get("executeQuery"), "Query execution on remote server done");
+                executeQueryByProxy(context, host_ports, ast, res, in_interactive_txn, query);
+                LOG_DEBUG(&Poco::Logger::get("executeQuery"), "Query forwarded to remote server done");
                 return std::make_tuple(ast, std::move(res));
             }
         }
@@ -846,9 +983,17 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     auto txn = prepareCnchTransaction(context, ast);
     if (txn)
     {
-        trySetVirtualWarehouseAndWorkerGroup(ast, context);
+        trySetVirtualWarehouseWithBackup(context, ast);
         if (context->getServerType() == ServerType::cnch_server)
         {
+            if (context->getVWCustomizedSettings())
+            {
+                auto vw_name = tryGetVirtualWarehouseName(ast, context);
+                if (vw_name != EMPTY_VIRTUAL_WAREHOUSE_NAME)
+                {
+                    context->getVWCustomizedSettings()->overwriteDefaultSettings(vw_name, context->getSettingsRef());
+                }
+            }
             context->initCnchServerResource(txn->getTransactionID());
             if (!internal && !ast->as<ASTShowProcesslistQuery>() && context->getSettingsRef().enable_query_queue)
                 tryQueueQuery(context, ast->getType());
@@ -859,6 +1004,9 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
     String query(begin, query_end);
 
     String query_for_logging;
+
+    ProcessListQueryType query_type {ProcessListQueryType::Default};
+    std::optional<bool> is_unlimited_query;
 
     try
     {
@@ -902,6 +1050,9 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
         {
             /// processlist also has query masked now, to avoid secrets leaks though SHOW PROCESSLIST by other users.
             process_list_entry = context->getProcessList().insert(query_for_logging, ast.get(), context);
+            QueryStatus & process_list_elem = process_list_entry->get();
+            query_type = process_list_elem.getType();
+            is_unlimited_query = process_list_elem.isUnlimitedQuery();
             context->setProcessListEntry(process_list_entry);
         }
 
@@ -1344,7 +1495,25 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                         const auto finish_time = std::chrono::system_clock::now();
                         elem.event_time = time_in_seconds(finish_time);
                         elem.event_time_microseconds = time_in_microseconds(finish_time);
+                        elem.graphviz = process_list_elem->getGraphviz();
                         status_info_to_query_log(elem, info, ast);
+
+
+                        if (process_list_elem->isUnlimitedQuery())
+                            HistogramMetrics::increment(
+                                HistogramMetrics::UnlimitedQueryLatency, elem.query_duration_ms, {}, Metrics::MetricType::Timer);
+                        else
+                        {
+                            if (auto vw = context->tryGetCurrentVW())
+                                HistogramMetrics::increment(
+                                    HistogramMetrics::QueryLatency,
+                                    elem.query_duration_ms,
+                                    {{"vw", vw->getName()}},
+                                    Metrics::MetricType::Timer);
+                            else
+                                HistogramMetrics::increment(
+                                    HistogramMetrics::UnlimitedQueryLatency, elem.query_duration_ms, {}, Metrics::MetricType::Timer);
+                        }
 
                         auto progress_callback = context->getProgressCallback();
 
@@ -1548,7 +1717,9 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                                        query_id,
                                        finish_current_transaction,
                                        complex_query,
-                                       init_time](UInt64 runtime_latency) mutable {
+                                       init_time,
+                                       query_type,
+                                       is_unlimited_query](UInt64 runtime_latency) mutable {
                 finish_current_transaction(context);
                 if (quota)
                     quota->used(Quota::ERRORS, 1, /* check_exceeded = */ false);
@@ -1583,6 +1754,14 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
 
                 bool throw_root_cause = needThrowRootCauseError(context.get(), elem.exception_code, elem.exception);
 
+                LabelledMetrics::MetricLabels labels = markQueryProfileEventLabels(context, query_type, is_unlimited_query);
+                labels.insert({"processing_stage", "processing"});
+                ProfileEvents::increment(ProfileEvents::QueriesFailed, 1, labels);
+                // if (ErrorCodes::USER_ERRORS.find(error_code) != ErrorCodes::USER_ERRORS.end())
+                //     ProfileEvents::increment(ProfileEvents::QueriesFailedFromUser, 1, labels);
+                // else
+                ProfileEvents::increment(ProfileEvents::QueriesFailedFromEngine, 1, labels);
+
                 logException(context, elem);
 
                 /// In case of exception we log internal queries also
@@ -1610,6 +1789,7 @@ static std::tuple<ASTPtr, BlockIO> executeQueryImpl(
                 }
 
                 ProfileEvents::increment(ProfileEvents::FailedQuery);
+
                 if (ast->as<ASTSelectQuery>() || ast->as<ASTSelectWithUnionQuery>())
                 {
                     ProfileEvents::increment(ProfileEvents::FailedSelectQuery);
@@ -1670,20 +1850,17 @@ void tryOutfile(BlockIO & streams, ASTPtr ast, ContextMutablePtr context)
 
     try
     {
-        WriteBuffer * out_buf;
-        String compression_method_str;
-        UInt64 compression_level = 1;
-        OutfileTargetPtr outfile_target;
-
         String format_name = ast_query_with_output && (ast_query_with_output->format != nullptr)
             ? getIdentifierName(ast_query_with_output->format)
             : context->getDefaultFormat();
 
-        const auto & out_path = typeid_cast<const ASTLiteral &>(*ast_query_with_output->out_file).value.safeGet<std::string>();
+        String compression_method_str;
+        UInt64 compression_level = 1;
         OutfileTarget::setOufileCompression(ast_query_with_output, compression_method_str, compression_level);
 
-        outfile_target = OutfileTarget::getOutfileTarget(out_path, format_name, compression_method_str, compression_level);
-        out_buf = outfile_target->getOutfileBuffer(context);
+        const auto & out_path = typeid_cast<const ASTLiteral &>(*ast_query_with_output->out_file).value.safeGet<std::string>();
+        OutfileTargetPtr outfile_target = OutfileTarget::getOutfileTarget(out_path, format_name, compression_method_str, compression_level);
+        std::shared_ptr<WriteBuffer> out_buf = outfile_target->getOutfileBuffer(context);
 
         auto & pipeline = streams.pipeline;
 
@@ -1703,6 +1880,7 @@ void tryOutfile(BlockIO & streams, ASTPtr ast, ContextMutablePtr context)
 
                 OutputFormatPtr out = FormatFactory::instance().getOutputFormatParallelIfPossible(
                     format_name, *out_buf, pipeline.getHeader(), context, {});
+                out->setBuffer(out_buf);
 
                 out->setAutoFlush();
                 /// Save previous progress callback if any.
@@ -1894,32 +2072,34 @@ void executeQuery(
         {
             const auto * ast_query_with_output = dynamic_cast<const ASTQueryWithOutput *>(ast.get());
 
-            WriteBuffer * out_buf = &ostr;
-            OutfileTargetPtr outfile_target;
-            std::optional<String> out_path;
-
             String format_name = ast_query_with_output && (ast_query_with_output->format != nullptr)
                 ? getIdentifierName(ast_query_with_output->format)
                 : context->getDefaultFormat();
 
+            OutfileTargetPtr outfile_target;
+            BlockOutputStreamPtr out;
             if (ast_query_with_output && ast_query_with_output->out_file)
             {
-                out_path.emplace(typeid_cast<const ASTLiteral &>(*ast_query_with_output->out_file).value.safeGet<std::string>());
+                auto out_path = typeid_cast<const ASTLiteral &>(*ast_query_with_output->out_file).value.safeGet<std::string>();
                 String compression_method_str;
                 UInt64 compression_level = 1;
                 OutfileTarget::setOufileCompression(ast_query_with_output, compression_method_str, compression_level);
-                outfile_target = OutfileTarget::getOutfileTarget(*out_path, format_name, compression_method_str, compression_level);
-                out_buf = outfile_target->getOutfileBuffer(context, allow_into_outfile);
+                outfile_target = OutfileTarget::getOutfileTarget(out_path, format_name, compression_method_str, compression_level);
+                auto out_buf = outfile_target->getOutfileBuffer(context, allow_into_outfile);
+                out = FormatFactory::instance().getOutputStreamParallelIfPossible(
+                    format_name, *out_buf, streams.in->getHeader(), context, {}, output_format_settings);
+                out->setBuffer(out_buf);
+            } else {
+                out = FormatFactory::instance().getOutputStreamParallelIfPossible(
+                    format_name, ostr, streams.in->getHeader(), context, {}, output_format_settings);
             }
-
-            auto out = FormatFactory::instance().getOutputStreamParallelIfPossible(
-                format_name, *out_buf, streams.in->getHeader(), context, {}, output_format_settings);
 
             /// Save previous progress callback if any. TODO Do it more conveniently.
             auto previous_progress_callback = context->getProgressCallback();
 
             /// NOTE Progress callback takes shared ownership of 'out'.
-            streams.in->setProgressCallback([out, previous_progress_callback](const Progress & progress) {
+            streams.in->setProgressCallback(
+                [out, previous_progress_callback](const Progress & progress) {
                 if (previous_progress_callback)
                     previous_progress_callback(progress);
                 out->onProgress(progress);
@@ -1932,20 +2112,19 @@ void executeQuery(
             copyData(
                 *streams.in, *out, []() { return false; }, [&out](const Block &) { out->flush(); });
 
-            if(outfile_target!=nullptr)
+            if (outfile_target!=nullptr)
                 outfile_target->flushFile();
         }
         else if (pipeline.initialized())
         {
             const ASTQueryWithOutput * ast_query_with_output = dynamic_cast<const ASTQueryWithOutput *>(ast.get());
 
-            WriteBuffer * out_buf = &ostr;
-            OutfileTargetPtr outfile_target;
-
             String format_name = ast_query_with_output && (ast_query_with_output->format != nullptr)
                 ? getIdentifierName(ast_query_with_output->format)
                 : context->getDefaultFormat();
 
+            OutfileTargetPtr outfile_target;
+            std::shared_ptr<WriteBuffer> out_buf;
             if (ast_query_with_output && ast_query_with_output->out_file)
             {
                 const auto & out_path = typeid_cast<const ASTLiteral &>(*ast_query_with_output->out_file).value.safeGet<std::string>();
@@ -1960,8 +2139,15 @@ void executeQuery(
             {
                 pipeline.addSimpleTransform([](const Block & header) { return std::make_shared<MaterializingTransform>(header); });
 
-                auto out = FormatFactory::instance().getOutputFormatParallelIfPossible(
-                    format_name, *out_buf, pipeline.getHeader(), context, {}, output_format_settings);
+                OutputFormatPtr out;
+                if (out_buf) {
+                    out = FormatFactory::instance().getOutputFormatParallelIfPossible(
+                        format_name, *out_buf, pipeline.getHeader(), context, {}, output_format_settings);
+                    out->setBuffer(out_buf);
+                } else {
+                    out = FormatFactory::instance().getOutputFormatParallelIfPossible(
+                        format_name, ostr, pipeline.getHeader(), context, {}, output_format_settings);
+                }
                 out->setAutoFlush();
 
                 /// Save previous progress callback if any. TODO Do it more conveniently.
