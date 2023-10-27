@@ -36,7 +36,7 @@ In case you want to build ByConity in metal machine, follow this [guide](https:/
 
 Using [Docker Compose](./docker/docker-compose/README.md) would be convenient for running a ByConity cluster.
 
-## Useful Link
+## Useful Links
 
 - [Official Website](https://byconity.github.io/): has a quick high-level overview of ByConity on the home page.
 - [Documentation](https://byconity.github.io/docs/introduction/main-principle-concepts): introduce basic usage guide and tech deep dive.
